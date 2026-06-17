@@ -530,7 +530,7 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
         log_lines.append(f"[{time.strftime('%H:%M:%S')}] 开始 ({width}x{height}, {steps}步, CFG={guidance_scale})")
         yield _yield("编码文本...")
 
-        _immediate_queue = queue.Queue(maxsize=1)
+        _immediate_queue = queue.Queue()
         _result_box = []
 
         def on_progress(pct, desc):
@@ -538,12 +538,9 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
                 raise gr.CancelledError()
             _yield.elapsed = f"{time.time() - t0:.1f}"
             log_lines.append(f"[{time.strftime('%H:%M:%S')}] {desc} ({_yield.elapsed}s)")
-            try:
-                _immediate_queue.put_nowait(
-                    (_yield.elapsed, desc, get_system_stats(), "\n".join(log_lines[-20:]))
-                )
-            except queue.Full:
-                pass
+            _immediate_queue.put_nowait(
+                (_yield.elapsed, desc, get_system_stats(), "\n".join(log_lines[-20:]))
+            )
 
         def target():
             try:
@@ -567,9 +564,17 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
         t_gen = threading.Thread(target=target, daemon=True)
         t_gen.start()
 
+        _last_yield = None
         while t_gen.is_alive():
             try:
-                _elapsed, _desc, _stats, _log_text = _immediate_queue.get(timeout=0.3)
+                # drain queue to get latest value
+                while True:
+                    _elapsed, _desc, _stats, _log_text = _immediate_queue.get_nowait()
+                    _last_yield = (_elapsed, _desc, _stats, _log_text)
+            except queue.Empty:
+                pass
+            if _last_yield is not None:
+                _elapsed, _desc, _stats, _log_text = _last_yield
                 yield (
                     None,
                     f'<div style="display:flex;align-items:center;gap:12px;padding:6px 12px;background:var(--background-fill-secondary);border-radius:6px;color:#888;font-family:monospace;font-size:0.85rem">'
@@ -578,10 +583,10 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
                     history_state, gr.skip(), gr.skip(),
                     _stats, "", _log_text,
                 )
-            except queue.Empty:
-                if _cancel_event.is_set():
-                    break
-                continue
+                _last_yield = None
+            if _cancel_event.is_set():
+                break
+            time.sleep(0.25)
 
         if not _result_box:
             raise gr.CancelledError()
