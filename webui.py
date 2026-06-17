@@ -368,6 +368,7 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
 <small style="color:#888">输入提示词 → 选择模型 → 生成图片 · 支持取消/自定义模型/自动下载/社区模型</small>""")
 
     history_state = gr.State([])
+    stage_log_state = gr.State("")
     model_info_state = gr.State("")
 
     with gr.Row(equal_height=False):
@@ -391,14 +392,14 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
                 width  = gr.Slider(512, 2048, 1024, step=64, label="宽度")
                 height = gr.Slider(512, 2048, 1024, step=64, label="高度")
             with gr.Row():
-                steps = gr.Slider(1, 100, 8, step=1, label="步数")
-                guidance_scale = gr.Slider(0.0, 10.0, 0.0, step=0.5, label="CFG")
-                seed = gr.Number(-1, label="种子", minimum=-1, precision=0)
+                steps = gr.Slider(1, 100, 8, step=1, label="步数", info="去噪步数，越高细节越丰富，但耗时越长")
+                guidance_scale = gr.Slider(0.0, 10.0, 0.0, step=0.5, label="CFG", info="提示词引导强度，越大越贴合提示词")
+                seed = gr.Number(-1, label="种子", minimum=-1, precision=0, info="-1=随机，固定值可复现相同结果")
             with gr.Row():
-                use_compile = gr.Checkbox(value=False, label="torch.compile", info="首次慢，后续快")
+                use_compile = gr.Checkbox(value=False, label="torch.compile", info="编译模型加速推理，首次较慢后续快")
                 attn_backend = gr.Dropdown(
                     choices=ATTENTION_OPTIONS, value="native",
-                    label="Attention", scale=2,
+                    label="Attention", scale=2, info="注意力机制后端，Flash Attn 2 可加速大图生成",
                 )
 
             with gr.Accordion("⚙️ 高级参数", open=False):
@@ -412,11 +413,14 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
                 cancel_btn = gr.Button("⏹ 取消", variant="stop", size="lg", scale=1)
                 clear_btn = gr.Button("🗑 清空", size="lg", scale=1)
 
-            system_monitor = gr.HTML(value=get_system_stats(), elem_classes="stat-card")
-
         with gr.Column(scale=3, min_width=500):
             output_image = gr.Image(label="生成结果", type="pil", height=520, elem_classes="output-img")
-            stage_display = gr.HTML(value='<div style="color:#666;font-family:monospace;font-size:0.9rem">就绪</div>')
+            with gr.Row():
+                stage_display = gr.HTML(
+                    value='<div style="color:#888;font-family:monospace;font-size:0.85rem;padding:6px 12px;background:var(--background-fill-secondary);border-radius:6px">就绪</div>',
+                    scale=2,
+                )
+                system_monitor = gr.HTML(value=get_system_stats(), elem_classes="stat-card", scale=1)
             elapsed_display = gr.Markdown("")
 
             gr.Markdown("### 🖼 历史记录", elem_classes="section-divider")
@@ -583,10 +587,8 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
 
         return (
             img,
-            f'<div style="display:flex;align-items:center;gap:2px;flex-wrap:wrap;color:#4caf50;font-family:monospace;font-size:0.9rem">'
-            f'<span>✅ 完成</span><span style="margin-left:auto;color:#aaa">{elapsed:.1f}s</span></div>'
-            f'<div style="margin-top:4px;height:4px;background:#333;border-radius:2px;overflow:hidden">'
-            f'<div style="width:100%;height:100%;background:#4caf50;border-radius:2px"></div></div>',
+            f'<div style="display:flex;align-items:center;gap:12px;padding:6px 12px;background:var(--background-fill-secondary);border-radius:6px;color:#4caf50;font-family:monospace;font-size:0.85rem">'
+            f'<span>✅ 完成</span><span style="margin-left:auto;color:#aaa">{elapsed:.1f}s</span></div>',
             f"⏱ 总耗时: **{elapsed:.1f}秒** | Steps: {steps} | CFG: {guidance_scale} | Seed: {seed}",
             history_state, gallery, detail_md,
             stats, save_path,
@@ -648,7 +650,7 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
             False, 1.0, 512,
             False, "native",
             None,
-            '<div style="color:#666;font-family:monospace;font-size:0.9rem">就绪</div>',
+            '<div style="color:#888;font-family:monospace;font-size:0.85rem;padding:6px 12px;background:var(--background-fill-secondary);border-radius:6px">就绪</div>',
             "",
             [], [],
             "点击上方缩略图查看参数详情",
