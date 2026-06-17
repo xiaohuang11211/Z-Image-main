@@ -389,8 +389,8 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
 
             gr.Markdown("### ⚙️ 参数", elem_classes="section-divider")
             with gr.Row():
-                width  = gr.Slider(512, 2048, 1024, step=64, label="宽度")
-                height = gr.Slider(512, 2048, 1024, step=64, label="高度")
+                width  = gr.Slider(512, 2048, 1920, step=64, label="宽度")
+                height = gr.Slider(512, 2048, 1080, step=64, label="高度")
             with gr.Row():
                 steps = gr.Slider(1, 100, 8, step=1, label="步数", info="去噪步数，越高细节越丰富，但耗时越长")
                 guidance_scale = gr.Slider(0.0, 10.0, 0.0, step=0.5, label="CFG", info="提示词引导强度，越大越贴合提示词")
@@ -473,7 +473,7 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
 
     download_btn.click(fn=download_selected, inputs=model_choice, outputs=model_info)
 
-    # 生成
+    # 生成（generator 实时更新 UI）
     def generate_image(
         prompt, neg_prompt, model_display_name,
         width, height, steps, guidance_scale,
@@ -485,7 +485,6 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
         if not prompt or not prompt.strip():
             raise gr.Error("请输入提示词")
 
-        # 解析模型 key
         if model_display_name not in MODEL_CHOICES_DICT:
             raise gr.Error(f"未知模型: {model_display_name}")
         model_key = MODEL_CHOICES_DICT[model_display_name]
@@ -494,22 +493,32 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
         height = (height // VAE_SCALE) * VAE_SCALE
         _cancel_event.clear()
         device = get_device()
-
-        progress(0, desc="加载模型中...")
         log_lines = [f"[{time.strftime('%H:%M:%S')}] 加载模型: {model_display_name}"]
+
+        def _yield(stage_text, pct=None):
+            stats = get_system_stats()
+            return (
+                None,
+                f'<div style="display:flex;align-items:center;gap:12px;padding:6px 12px;background:var(--background-fill-secondary);border-radius:6px;color:#888;font-family:monospace;font-size:0.85rem">'
+                f'<span>⏳ {stage_text}</span><span style="margin-left:auto;color:#aaa">{getattr(_yield, "elapsed", "0.0")}s</span></div>',
+                f"⏱ 进行中: {stage_text}",
+                history_state, gr.skip(), gr.skip(),
+                stats, "", "\n".join(log_lines[-20:]),
+            )
+
         try:
             comp = load_model(model_key, use_compile, attn_backend)
             log_lines.append(f"[{time.strftime('%H:%M:%S')}] 模型就绪 ✅")
+            yield _yield("模型就绪 ✅")
         except Exception as e:
             raise gr.Error(f"模型加载失败: {e}")
 
         if _cancel_event.is_set():
             raise gr.CancelledError()
 
-        # 根据模型建议自动调整参数
         model_cfg = MODEL_REGISTRY[model_key]
         if steps == 8 and model_cfg["steps"] != 8 and steps == model_cfg["steps"]:
-            pass  # 用户已手动调整
+            pass
         if guidance_scale == 0.0 and model_cfg["cfg"] > 0:
             guidance_scale = model_cfg["cfg"]
 
@@ -519,13 +528,14 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
         def on_progress(pct, desc):
             if _cancel_event.is_set():
                 raise gr.CancelledError()
-            elapsed = time.time() - t0
-            log_lines.append(f"[{time.strftime('%H:%M:%S')}] {desc} ({elapsed:.1f}s)")
+            _yield.elapsed = f"{time.time() - t0:.1f}"
+            log_lines.append(f"[{time.strftime('%H:%M:%S')}] {desc} ({_yield.elapsed}s)")
             progress(pct, desc=desc)
 
         t0 = time.time()
+        _yield.elapsed = "0.0"
         log_lines.append(f"[{time.strftime('%H:%M:%S')}] 开始 ({width}x{height}, {steps}步, CFG={guidance_scale})")
-        progress(0.01, desc="📝 编码文本...")
+        yield _yield("编码文本...")
         try:
             images = generate(
                 prompt=prompt,
@@ -585,7 +595,7 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
             f"**编译:** {'✅' if use_compile else '❌'} | **Attention:** {attn_backend}"
         )
 
-        return (
+        yield (
             img,
             f'<div style="display:flex;align-items:center;gap:12px;padding:6px 12px;background:var(--background-fill-secondary);border-radius:6px;color:#4caf50;font-family:monospace;font-size:0.85rem">'
             f'<span>✅ 完成</span><span style="margin-left:auto;color:#aaa">{elapsed:.1f}s</span></div>',
@@ -633,6 +643,7 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
             history_state, history_gallery, history_detail,
             system_monitor, save_path, log_output,
         ],
+        concurrency_limit=1,
     )
 
     cancel_btn.click(fn=lambda: _cancel_event.set(), cancels=[gen_event])
@@ -646,7 +657,7 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
     clear_btn.click(
         fn=lambda: (
             "", "", MODEL_CHOICES[0],
-            1024, 1024, 8, 0.0, -1,
+            1920, 1080, 8, 0.0, -1,
             False, 1.0, 512,
             False, "native",
             None,
@@ -673,4 +684,5 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
     )
 
 if __name__ == "__main__":
+    demo.queue(default_concurrency_limit=3)
     demo.launch(server_name="0.0.0.0", server_port=7860, share=False)
