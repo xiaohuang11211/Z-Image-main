@@ -1,5 +1,5 @@
 """Z-Image Web UI — 完整版（模型库·介绍·自动下载·回档）"""
-import json, os, time, warnings, threading
+import json, os, time, warnings, threading, queue
 from pathlib import Path
 from collections import OrderedDict
 
@@ -480,7 +480,6 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
         cfg_norm, cfg_trunc, max_seq_len, seed,
         use_compile, attn_backend,
         history_state, stage_log_state,
-        progress=gr.Progress(track_tqdm=True),
     ):
         if not prompt or not prompt.strip():
             raise gr.Error("请输入提示词")
@@ -495,12 +494,13 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
         device = get_device()
         log_lines = [f"[{time.strftime('%H:%M:%S')}] 加载模型: {model_display_name}"]
 
-        def _yield(stage_text, pct=None):
+        def _yield(stage_text):
             stats = get_system_stats()
+            elapsed = getattr(_yield, "elapsed", "0.0")
             return (
                 None,
                 f'<div style="display:flex;align-items:center;gap:12px;padding:6px 12px;background:var(--background-fill-secondary);border-radius:6px;color:#888;font-family:monospace;font-size:0.85rem">'
-                f'<span>⏳ {stage_text}</span><span style="margin-left:auto;color:#aaa">{getattr(_yield, "elapsed", "0.0")}s</span></div>',
+                f'<span>⏳ {stage_text}</span><span style="margin-left:auto;color:#aaa">{elapsed}s</span></div>',
                 f"⏱ 进行中: {stage_text}",
                 history_state, gr.skip(), gr.skip(),
                 stats, "", "\n".join(log_lines[-20:]),
@@ -525,35 +525,72 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
         use_cfg = guidance_scale > 1.0
         gen = torch.Generator(device).manual_seed(seed) if seed >= 0 else None
 
+        t0 = time.time()
+        _yield.elapsed = "0.0"
+        log_lines.append(f"[{time.strftime('%H:%M:%S')}] 开始 ({width}x{height}, {steps}步, CFG={guidance_scale})")
+        yield _yield("编码文本...")
+
+        _immediate_queue = queue.Queue(maxsize=1)
+        _result_box = []
+
         def on_progress(pct, desc):
             if _cancel_event.is_set():
                 raise gr.CancelledError()
             _yield.elapsed = f"{time.time() - t0:.1f}"
             log_lines.append(f"[{time.strftime('%H:%M:%S')}] {desc} ({_yield.elapsed}s)")
-            progress(pct, desc=desc)
+            try:
+                _immediate_queue.put_nowait(
+                    (_yield.elapsed, desc, get_system_stats(), "\n".join(log_lines[-20:]))
+                )
+            except queue.Full:
+                pass
 
-        t0 = time.time()
-        _yield.elapsed = "0.0"
-        log_lines.append(f"[{time.strftime('%H:%M:%S')}] 开始 ({width}x{height}, {steps}步, CFG={guidance_scale})")
-        yield _yield("编码文本...")
-        try:
-            images = generate(
-                prompt=prompt,
-                negative_prompt=neg_prompt if use_cfg else None,
-                **comp,
-                height=height, width=width,
-                num_inference_steps=steps,
-                guidance_scale=guidance_scale,
-                generator=gen,
-                cfg_normalization=cfg_norm,
-                cfg_truncation=cfg_trunc if cfg_trunc > 0 else None,
-                max_sequence_length=max_seq_len,
-                _progress_callback=on_progress,
-            )
-        except gr.CancelledError:
-            raise
-        except Exception as e:
-            raise gr.Error(f"生成失败: {e}")
+        def target():
+            try:
+                imgs = generate(
+                    prompt=prompt,
+                    negative_prompt=neg_prompt if use_cfg else None,
+                    **comp,
+                    height=height, width=width,
+                    num_inference_steps=steps,
+                    guidance_scale=guidance_scale,
+                    generator=gen,
+                    cfg_normalization=cfg_norm,
+                    cfg_truncation=cfg_trunc if cfg_trunc > 0 else None,
+                    max_sequence_length=max_seq_len,
+                    _progress_callback=on_progress,
+                )
+                _result_box.append(imgs)
+            except BaseException as e:
+                _result_box.append(e)
+
+        t_gen = threading.Thread(target=target, daemon=True)
+        t_gen.start()
+
+        while t_gen.is_alive():
+            try:
+                _elapsed, _desc, _stats, _log_text = _immediate_queue.get(timeout=0.3)
+                yield (
+                    None,
+                    f'<div style="display:flex;align-items:center;gap:12px;padding:6px 12px;background:var(--background-fill-secondary);border-radius:6px;color:#888;font-family:monospace;font-size:0.85rem">'
+                    f'<span>⏳ {_desc}</span><span style="margin-left:auto;color:#aaa">{_elapsed}s</span></div>',
+                    f"⏱ {_desc}",
+                    history_state, gr.skip(), gr.skip(),
+                    _stats, "", _log_text,
+                )
+            except queue.Empty:
+                if _cancel_event.is_set():
+                    break
+                continue
+
+        if not _result_box:
+            raise gr.CancelledError()
+        result = _result_box[0]
+        if isinstance(result, BaseException):
+            if isinstance(result, gr.CancelledError):
+                raise
+            raise gr.Error(f"生成失败: {result}")
+        images = result
 
         if _cancel_event.is_set():
             raise gr.CancelledError()
