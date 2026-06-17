@@ -1,23 +1,36 @@
-@echo off
-chcp 65001 >nul
-title Z-Image 文生图
-
-echo ╔══════════════════════════════════════╗
-echo ║      ⚡ Z-Image 文生图  启动中...    ║
-echo ╚══════════════════════════════════════╝
-echo.
-
-cd /d "%~dp0"
-
-REM 优先使用 PowerShell 启动器（支持自动安装 Python）
-echo 🔧 正在启动...
-echo.
-
-powershell -NoProfile -ExecutionPolicy Bypass -File "启动webui.ps1"
-
-if %errorlevel% neq 0 (
-    echo.
-    echo ⚠️ 启动失败
-    echo 请确保已安装 Python 3.10+ 后直接运行: python webui.py
-    pause
-)
+@echo off
+chcp 65001 >nul
+title Z-Image Launcher
+
+echo ========================================
+echo      Z-Image WebUI  Starting...
+echo ========================================
+echo.
+
+cd /d "%~dp0"
+
+echo [1/3] Checking Python...
+where python >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [*] Python not found, trying auto-install...
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "& '%~dp0启动webui.ps1'"
+    if %errorlevel% neq 0 (
+        echo [!] Failed. Please install Python 3.10+ from python.org
+        pause
+        exit /b 1
+    )
+    pause
+    exit /b 0
+)
+
+echo [2/3] Launching WebUI...
+echo.
+echo Open browser at: http://localhost:7860
+echo Press Ctrl+C to stop
+echo.
+
+start http://localhost:7860
+python webui.py
+
+echo.
+pause
