@@ -357,6 +357,16 @@ class AutoencoderKL(nn.Module):
     def dtype(self):
         return next(self.parameters()).dtype
 
+    def encode(self, x: torch.FloatTensor, generator: Optional[torch.Generator] = None) -> torch.FloatTensor:
+        h = self.encoder(x)
+        if self.quant_conv is not None:
+            moments = self.quant_conv(h)
+        else:
+            moments = h
+        mean, logvar = moments.chunk(2, dim=1)
+        sample = mean + torch.exp(0.5 * logvar) * torch.randn_like(mean, generator=generator)
+        return sample.to(dtype=torch.float32)
+
     def decode(self, z: torch.FloatTensor, return_dict: bool = True) -> AutoencoderKLOutput:
         if self.post_quant_conv is not None:
             z = self.post_quant_conv(z)

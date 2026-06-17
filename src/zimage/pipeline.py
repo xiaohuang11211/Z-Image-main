@@ -307,3 +307,257 @@ def generate(
     if _progress_callback is not None:
         _progress_callback(1.0, "完成")
     return image
+
+
+@torch.no_grad()
+def generate_img2img(
+    transformer,
+    vae,
+    text_encoder,
+    tokenizer,
+    scheduler,
+    prompt: Union[str, List[str]],
+    init_image: "PIL.Image.Image",
+    strength: float = 0.8,
+    height: int = 1024,
+    width: int = 1024,
+    num_inference_steps: int = 50,
+    guidance_scale: float = 3.5,
+    negative_prompt: Optional[Union[str, List[str]]] = None,
+    num_images_per_prompt: int = 1,
+    generator: Optional[torch.Generator] = None,
+    cfg_normalization: bool = False,
+    cfg_truncation: float = DEFAULT_CFG_TRUNCATION,
+    max_sequence_length: int = DEFAULT_MAX_SEQUENCE_LENGTH,
+    output_type: str = "pil",
+    _progress_callback: Optional[Callable[[float, str], None]] = None,
+):
+    device = next(transformer.parameters()).device
+
+    if hasattr(vae, "config") and hasattr(vae.config, "block_out_channels"):
+        vae_scale_factor = 2 ** (len(vae.config.block_out_channels) - 1)
+    else:
+        vae_scale_factor = 8
+    vae_scale = vae_scale_factor * 2
+
+    if height % vae_scale != 0:
+        raise ValueError(f"Height must be divisible by {vae_scale} (got {height}).")
+    if width % vae_scale != 0:
+        raise ValueError(f"Width must be divisible by {vae_scale} (got {width}).")
+
+    if isinstance(prompt, str):
+        batch_size = 1
+        prompt = [prompt]
+    else:
+        batch_size = len(prompt)
+
+    do_classifier_free_guidance = guidance_scale > 1.0
+    logger.info(f"Img2Img: {height}x{width}, strength={strength}, steps={num_inference_steps}, cfg={guidance_scale}")
+
+    # --- text encoding (same as generate) ---
+    formatted_prompts = []
+    for p in prompt:
+        messages = [{"role": "user", "content": p}]
+        formatted_prompt = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True, enable_thinking=True,
+        )
+        formatted_prompts.append(formatted_prompt)
+
+    if _progress_callback is not None:
+        _progress_callback(0.01, "📝 编码文本...")
+
+    text_inputs = tokenizer(
+        formatted_prompts, padding="max_length", max_length=max_sequence_length,
+        truncation=True, return_tensors="pt",
+    )
+    text_input_ids = text_inputs.input_ids.to(device)
+    prompt_masks = text_inputs.attention_mask.to(device).bool()
+
+    text_encoder.to(device)
+    prompt_embeds = text_encoder(
+        input_ids=text_input_ids, attention_mask=prompt_masks, output_hidden_states=True,
+    ).hidden_states[-2]
+    text_encoder.to("cpu")
+
+    prompt_embeds_list = []
+    for i in range(len(prompt_embeds)):
+        prompt_embeds_list.append(prompt_embeds[i][prompt_masks[i]])
+
+    negative_prompt_embeds_list = []
+    if do_classifier_free_guidance:
+        if negative_prompt is None:
+            negative_prompt = ["" for _ in prompt]
+        elif isinstance(negative_prompt, str):
+            negative_prompt = [negative_prompt]
+
+        neg_formatted = []
+        for p in negative_prompt:
+            messages = [{"role": "user", "content": p}]
+            formatted_prompt = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True, enable_thinking=True,
+            )
+            neg_formatted.append(formatted_prompt)
+
+        neg_inputs = tokenizer(
+            neg_formatted, padding="max_length", max_length=max_sequence_length,
+            truncation=True, return_tensors="pt",
+        )
+        neg_input_ids = neg_inputs.input_ids.to(device)
+        neg_masks = neg_inputs.attention_mask.to(device).bool()
+
+        text_encoder.to(device)
+        neg_embeds = text_encoder(
+            input_ids=neg_input_ids, attention_mask=neg_masks, output_hidden_states=True,
+        ).hidden_states[-2]
+        text_encoder.to("cpu")
+
+        for i in range(len(neg_embeds)):
+            negative_prompt_embeds_list.append(neg_embeds[i][neg_masks[i]])
+
+    if num_images_per_prompt > 1:
+        prompt_embeds_list = [pe for pe in prompt_embeds_list for _ in range(num_images_per_prompt)]
+        if do_classifier_free_guidance:
+            negative_prompt_embeds_list = [
+                npe for npe in negative_prompt_embeds_list for _ in range(num_images_per_prompt)
+            ]
+
+    # --- encode init image to latents ---
+    import numpy as np
+    from PIL import Image as PILImage
+    if isinstance(init_image, PILImage.Image):
+        init_image = init_image.convert("RGB").resize((width, height), PILImage.LANCZOS)
+
+    img_arr = np.array(init_image).astype(np.float32) / 127.5 - 1.0
+    img_tensor = torch.from_numpy(img_arr).permute(2, 0, 1).unsqueeze(0).to(device)
+
+    if _progress_callback is not None:
+        _progress_callback(0.05, "编码输入图像...")
+
+    vae.to(device)
+    latents = vae.encode(img_tensor, generator=generator)
+    if hasattr(vae.config, "shift_factor") and vae.config.shift_factor:
+        latents = (latents - vae.config.shift_factor) * vae.config.scaling_factor
+    else:
+        latents = latents * vae.config.scaling_factor
+    vae.to("cpu")
+
+    # --- timesteps ---
+    height_latent = 2 * (int(height) // vae_scale)
+    width_latent = 2 * (int(width) // vae_scale)
+    shape = (batch_size * num_images_per_prompt, transformer.in_channels, height_latent, width_latent)
+
+    actual_batch_size = batch_size * num_images_per_prompt
+    image_seq_len = (height_latent // 2) * (width_latent // 2)
+
+    mu = calculate_shift(
+        image_seq_len,
+        scheduler.config.get("base_image_seq_len", 256),
+        scheduler.config.get("max_image_seq_len", 4096),
+        scheduler.config.get("base_shift", 0.5),
+        scheduler.config.get("max_shift", 1.15),
+    )
+    scheduler.sigma_min = 0.0
+    timesteps, num_inference_steps = retrieve_timesteps(
+        scheduler, num_inference_steps, device, sigmas=None, **{"mu": mu},
+    )
+
+    # --- add noise per strength ---
+    init_timestep = max(int(num_inference_steps * (1.0 - strength)), 1)
+    t_start = max(len(timesteps) - init_timestep, 0)
+    timesteps = timesteps[t_start:]
+
+    if _progress_callback is not None:
+        _progress_callback(0.07, f"添加噪声 (强度={strength})")
+
+    noise = torch.randn(shape, generator=generator, device=device, dtype=torch.float32)
+    latents = scheduler.add_noise(latents, noise, timesteps[:1])
+
+    # --- denoising loop ---
+    from tqdm import tqdm
+
+    logger.info(f"Img2Img denoising: {len(timesteps)} steps")
+
+    for i, t in enumerate(tqdm(timesteps, desc="Denoising", total=len(timesteps))):
+        if t == 0 and i == len(timesteps) - 1:
+            logger.debug(f"Step {i+1}/{len(timesteps)} | t: {t.item():.2f} | Skipping")
+            continue
+
+        if _progress_callback is not None:
+            pct = 0.05 + 0.80 * (i + 1) / max(len(timesteps), 1)
+            _progress_callback(pct, f"🔄 去噪 {i+1}/{len(timesteps)}")
+
+        timestep = t.expand(latents.shape[0])
+        timestep = (1000 - timestep) / 1000
+        t_norm = timestep[0].item()
+
+        current_guidance_scale = guidance_scale
+        if do_classifier_free_guidance and cfg_truncation is not None and float(cfg_truncation) <= 1:
+            if t_norm > cfg_truncation:
+                current_guidance_scale = 0.0
+
+        apply_cfg = do_classifier_free_guidance and current_guidance_scale > 0
+
+        if apply_cfg:
+            latents_typed = latents.to(
+                transformer.dtype if hasattr(transformer, "dtype") else next(transformer.parameters()).dtype
+            )
+            latent_model_input = latents_typed.repeat(2, 1, 1, 1)
+            prompt_embeds_model_input = prompt_embeds_list + negative_prompt_embeds_list
+            timestep_model_input = timestep.repeat(2)
+        else:
+            latent_model_input = latents.to(next(transformer.parameters()).dtype)
+            prompt_embeds_model_input = prompt_embeds_list
+            timestep_model_input = timestep
+
+        latent_model_input = latent_model_input.unsqueeze(2)
+        latent_model_input_list = list(latent_model_input.unbind(dim=0))
+
+        model_out_list = transformer(
+            latent_model_input_list,
+            timestep_model_input,
+            prompt_embeds_model_input,
+        )[0]
+
+        if apply_cfg:
+            pos_out = model_out_list[:actual_batch_size]
+            neg_out = model_out_list[actual_batch_size:]
+            noise_pred = []
+            for j in range(actual_batch_size):
+                pos = pos_out[j].float()
+                neg = neg_out[j].float()
+                pred = pos + current_guidance_scale * (pos - neg)
+                if cfg_normalization and float(cfg_normalization) > 0.0:
+                    ori_pos_norm = torch.linalg.vector_norm(pos)
+                    new_pos_norm = torch.linalg.vector_norm(pred)
+                    max_new_norm = ori_pos_norm * float(cfg_normalization)
+                    if new_pos_norm > max_new_norm:
+                        pred = pred * (max_new_norm / new_pos_norm)
+                noise_pred.append(pred)
+            noise_pred = torch.stack(noise_pred, dim=0)
+        else:
+            noise_pred = torch.stack([t.float() for t in model_out_list], dim=0)
+
+        noise_pred = -noise_pred.squeeze(2)
+        latents = scheduler.step(noise_pred.to(torch.float32), t, latents, return_dict=False)[0]
+        assert latents.dtype == torch.float32
+
+    if output_type == "latent":
+        return latents
+
+    if _progress_callback is not None:
+        _progress_callback(0.85, "解码 VAE...")
+    logger.info("Decoding VAE...")
+    shift_factor = getattr(vae.config, "shift_factor", 0.0) or 0.0
+    latents = (latents.to(vae.dtype) / vae.config.scaling_factor) + shift_factor
+    image = vae.decode(latents.to(vae.device), return_dict=False)[0]
+
+    if output_type == "pil":
+        from PIL import Image as PILImage
+        image = (image / 2 + 0.5).clamp(0, 1)
+        image = image.cpu().permute(0, 2, 3, 1).float().numpy()
+        image = (image * 255).round().astype("uint8")
+        image = [PILImage.fromarray(img) for img in image]
+
+    if _progress_callback is not None:
+        _progress_callback(1.0, "完成")
+    return image

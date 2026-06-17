@@ -9,7 +9,7 @@ import psutil
 
 warnings.filterwarnings("ignore")
 from utils import ensure_model_weights, load_from_local_dir, set_attention_backend, load_sharded_safetensors
-from zimage import generate
+from zimage import generate, generate_img2img
 from zimage.transformer import ZImageTransformer2DModel
 
 os.environ["ZIMAGE_ATTENTION"] = os.environ.get("ZIMAGE_ATTENTION", "native")
@@ -363,18 +363,29 @@ CSS = """
 .section-divider{color:#555;font-size:0.8rem;letter-spacing:1px;margin:4px 0 2px;border-bottom:1px solid var(--border-color-primary)}
 """
 
-with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as demo:
-    gr.Markdown("""# ⚡ Z-Image 文生图  ·  阿里巴巴通义实验室
-<small style="color:#888">输入提示词 → 选择模型 → 生成图片 · 支持取消/自定义模型/自动下载/社区模型</small>""")
+with gr.Blocks(title="Z-Image 文生图/图生图", css=CSS, theme=gr.themes.Soft()) as demo:
+    gr.Markdown("""# ⚡ Z-Image  ·  阿里巴巴通义实验室
+<small style="color:#888">文生图 / 图生图 · 支持取消/批量/自定义模型/自动下载/社区模型</small>""")
 
     history_state = gr.State([])
     stage_log_state = gr.State("")
     model_info_state = gr.State("")
+    mode_state = gr.State("txt2img")
 
     with gr.Row(equal_height=False):
         with gr.Column(scale=2, min_width=400):
-            prompt = gr.Textbox(label="📝 提示词", placeholder="描述你想要的图片…", lines=4)
-            neg_prompt = gr.Textbox(label="➖ 负向提示词（可选）", lines=2)
+            with gr.Tabs() as tabs:
+                with gr.Tab("🎨 文生图") as tab_txt:
+                    prompt_txt = gr.Textbox(label="📝 提示词", placeholder="描述你想要的图片…", lines=4)
+                    neg_txt = gr.Textbox(label="➖ 负向提示词（可选）", lines=2)
+                    with gr.Row():
+                        width  = gr.Slider(512, 2048, 1920, step=64, label="宽度")
+                        height = gr.Slider(512, 2048, 1080, step=64, label="高度")
+                with gr.Tab("🖼 图生图") as tab_img:
+                    init_image = gr.Image(label="上传图片", type="pil", height=300)
+                    strength = gr.Slider(0.0, 1.0, 0.8, step=0.05, label="强度", info="0=原图不变，1=完全重绘")
+                    prompt_img = gr.Textbox(label="📝 描述词", placeholder="描述要对图片做的修改…", lines=3)
+                    neg_img = gr.Textbox(label="➖ 负向描述词（可选）", lines=2)
 
             gr.Markdown("### 🤖 模型", elem_classes="section-divider")
             model_choice = gr.Dropdown(
@@ -388,9 +399,6 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
                 download_btn = gr.Button("📥 自动下载", size="sm", scale=1, variant="primary")
 
             gr.Markdown("### ⚙️ 参数", elem_classes="section-divider")
-            with gr.Row():
-                width  = gr.Slider(512, 2048, 1920, step=64, label="宽度")
-                height = gr.Slider(512, 2048, 1080, step=64, label="高度")
             with gr.Row():
                 steps = gr.Slider(1, 100, 8, step=1, label="步数", info="去噪步数，越高细节越丰富，但耗时越长")
                 guidance_scale = gr.Slider(0.0, 10.0, 0.0, step=0.5, label="CFG", info="提示词引导强度，越大越贴合提示词")
@@ -407,6 +415,8 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
                 with gr.Row():
                     cfg_trunc = gr.Slider(0.0, 1.0, 1.0, step=0.05, label="CFG 截断")
                     max_seq_len = gr.Slider(128, 1024, 512, step=64, label="最大序列长度")
+
+            batch_count = gr.Slider(1, 8, 1, step=1, label="批量生成数量", info="一次生成多张图片，使用不同随机种子")
 
             with gr.Row():
                 gen_btn = gr.Button("✨ 生成", variant="primary", size="lg", scale=3)
@@ -473,25 +483,79 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
 
     download_btn.click(fn=download_selected, inputs=model_choice, outputs=model_info)
 
-    # 生成（generator 实时更新 UI）
+    # ── 生成（generator · 双模式 · 批量）───────
+    def _run_one(
+        mode, prompt, neg_prompt, init_image, strength,
+        model_key, comp, width, height, steps, guidance_scale,
+        cfg_norm, cfg_trunc, max_seq_len, seed, device,
+        on_progress,
+    ):
+        """在子线程中运行单次生成"""
+        use_cfg = guidance_scale > 1.0
+        current_seed = seed if seed >= 0 else None
+        gen = torch.Generator(device).manual_seed(current_seed) if current_seed is not None else None
+
+        if mode == "img2img":
+            return generate_img2img(
+                prompt=prompt,
+                negative_prompt=neg_prompt if use_cfg else None,
+                init_image=init_image,
+                strength=strength,
+                **comp,
+                height=height, width=width,
+                num_inference_steps=steps,
+                guidance_scale=guidance_scale,
+                generator=gen,
+                cfg_normalization=cfg_norm,
+                cfg_truncation=cfg_trunc if cfg_trunc > 0 else None,
+                max_sequence_length=max_seq_len,
+                _progress_callback=on_progress,
+            )
+        else:
+            return generate(
+                prompt=prompt,
+                negative_prompt=neg_prompt if use_cfg else None,
+                **comp,
+                height=height, width=width,
+                num_inference_steps=steps,
+                guidance_scale=guidance_scale,
+                generator=gen,
+                cfg_normalization=cfg_norm,
+                cfg_truncation=cfg_trunc if cfg_trunc > 0 else None,
+                max_sequence_length=max_seq_len,
+                _progress_callback=on_progress,
+            )
+
     def generate_image(
-        prompt, neg_prompt, model_display_name,
-        width, height, steps, guidance_scale,
+        mode, prompt_txt, neg_txt, prompt_img, neg_img, init_image, strength,
+        model_display_name, width, height, steps, guidance_scale,
         cfg_norm, cfg_trunc, max_seq_len, seed,
         use_compile, attn_backend,
-        history_state, stage_log_state,
+        history_state, stage_log_state, batch_count,
     ):
-        if not prompt or not prompt.strip():
-            raise gr.Error("请输入提示词")
-
         if model_display_name not in MODEL_CHOICES_DICT:
             raise gr.Error(f"未知模型: {model_display_name}")
         model_key = MODEL_CHOICES_DICT[model_display_name]
+
+        # pick prompt by mode
+        if mode == "txt2img":
+            prompt = prompt_txt
+            neg_prompt = neg_txt
+        else:
+            prompt = prompt_img
+            neg_prompt = neg_img
+            if init_image is None:
+                raise gr.Error("图生图模式请先上传图片")
+
+        if not prompt or not prompt.strip():
+            raise gr.Error("请输入提示词")
 
         width = (width // VAE_SCALE) * VAE_SCALE
         height = (height // VAE_SCALE) * VAE_SCALE
         _cancel_event.clear()
         device = get_device()
+
+        # load model once
         log_lines = [f"[{time.strftime('%H:%M:%S')}] 加载模型: {model_display_name}"]
 
         def _yield(stage_text):
@@ -522,128 +586,136 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
         if guidance_scale == 0.0 and model_cfg["cfg"] > 0:
             guidance_scale = model_cfg["cfg"]
 
-        use_cfg = guidance_scale > 1.0
-        gen = torch.Generator(device).manual_seed(seed) if seed >= 0 else None
+        # batch loop
+        all_records = []
+        saved_paths = []
+        last_img = None
+        seed_base = seed if seed >= 0 else -1
 
-        t0 = time.time()
-        _yield.elapsed = "0.0"
-        log_lines.append(f"[{time.strftime('%H:%M:%S')}] 开始 ({width}x{height}, {steps}步, CFG={guidance_scale})")
-        yield _yield("编码文本...")
-
-        _immediate_queue = queue.Queue()
-        _result_box = []
-
-        def on_progress(pct, desc):
+        for batch_i in range(batch_count):
             if _cancel_event.is_set():
                 raise gr.CancelledError()
-            _yield.elapsed = f"{time.time() - t0:.1f}"
-            log_lines.append(f"[{time.strftime('%H:%M:%S')}] {desc} ({_yield.elapsed}s)")
-            _immediate_queue.put_nowait(
-                (_yield.elapsed, desc, get_system_stats(), "\n".join(log_lines[-20:]))
+
+            current_seed = -1 if seed_base < 0 else seed_base + batch_i
+            batch_label = f" ({batch_i+1}/{batch_count})" if batch_count > 1 else ""
+
+            t0 = time.time()
+            _yield.elapsed = "0.0"
+            log_lines.append(f"[{time.strftime('%H:%M:%S')}] 开始#{batch_i+1} ({width}x{height}, {steps}步, CFG={guidance_scale})")
+            yield _yield(f"编码文本{batch_label}...")
+
+            _immediate_queue = queue.Queue()
+            _result_box = []
+
+            def on_progress(pct, desc):
+                if _cancel_event.is_set():
+                    raise gr.CancelledError()
+                _yield.elapsed = f"{time.time() - t0:.1f}"
+                log_lines.append(f"[{time.strftime('%H:%M:%S')}] {desc} ({_yield.elapsed}s)")
+                _immediate_queue.put_nowait(
+                    (_yield.elapsed, desc, get_system_stats(), "\n".join(log_lines[-20:]))
+                )
+
+            t_gen = threading.Thread(
+                target=lambda: _result_box.append(
+                    _run_one(mode, prompt, neg_prompt, init_image, strength,
+                             model_key, comp, width, height, steps, guidance_scale,
+                             cfg_norm, cfg_trunc, max_seq_len, current_seed, device,
+                             on_progress)
+                ) or _result_box.append(None),
+                daemon=True,
             )
+            t_gen.start()
 
-        def target():
-            try:
-                imgs = generate(
-                    prompt=prompt,
-                    negative_prompt=neg_prompt if use_cfg else None,
-                    **comp,
-                    height=height, width=width,
-                    num_inference_steps=steps,
-                    guidance_scale=guidance_scale,
-                    generator=gen,
-                    cfg_normalization=cfg_norm,
-                    cfg_truncation=cfg_trunc if cfg_trunc > 0 else None,
-                    max_sequence_length=max_seq_len,
-                    _progress_callback=on_progress,
-                )
-                _result_box.append(imgs)
-            except BaseException as e:
-                _result_box.append(e)
+            _last_yield = None
+            while t_gen.is_alive():
+                try:
+                    while True:
+                        _elapsed, _desc, _stats, _log_text = _immediate_queue.get_nowait()
+                        _last_yield = (_elapsed, _desc, _stats, _log_text)
+                except queue.Empty:
+                    pass
+                if _last_yield is not None:
+                    _elapsed, _desc, _stats, _log_text = _last_yield
+                    yield (
+                        None,
+                        f'<div style="display:flex;align-items:center;gap:12px;padding:6px 12px;background:var(--background-fill-secondary);border-radius:6px;color:#888;font-family:monospace;font-size:0.85rem">'
+                        f'<span>⏳ {_desc}</span><span style="margin-left:auto;color:#aaa">{_elapsed}s</span></div>',
+                        f"⏱ {_desc}",
+                        history_state, gr.skip(), gr.skip(),
+                        _stats, "", _log_text,
+                    )
+                    _last_yield = None
+                if _cancel_event.is_set():
+                    break
+                time.sleep(0.25)
 
-        t_gen = threading.Thread(target=target, daemon=True)
-        t_gen.start()
-
-        _last_yield = None
-        while t_gen.is_alive():
-            try:
-                # drain queue to get latest value
-                while True:
-                    _elapsed, _desc, _stats, _log_text = _immediate_queue.get_nowait()
-                    _last_yield = (_elapsed, _desc, _stats, _log_text)
-            except queue.Empty:
-                pass
-            if _last_yield is not None:
-                _elapsed, _desc, _stats, _log_text = _last_yield
-                yield (
-                    None,
-                    f'<div style="display:flex;align-items:center;gap:12px;padding:6px 12px;background:var(--background-fill-secondary);border-radius:6px;color:#888;font-family:monospace;font-size:0.85rem">'
-                    f'<span>⏳ {_desc}</span><span style="margin-left:auto;color:#aaa">{_elapsed}s</span></div>',
-                    f"⏱ {_desc}",
-                    history_state, gr.skip(), gr.skip(),
-                    _stats, "", _log_text,
-                )
-                _last_yield = None
             if _cancel_event.is_set():
-                break
-            time.sleep(0.25)
+                raise gr.CancelledError()
 
-        if not _result_box:
-            raise gr.CancelledError()
-        result = _result_box[0]
-        if isinstance(result, BaseException):
-            if isinstance(result, gr.CancelledError):
-                raise
-            raise gr.Error(f"生成失败: {result}")
-        images = result
+            # retrieve result
+            result = _result_box[0] if _result_box else None
+            if isinstance(result, BaseException):
+                if isinstance(result, gr.CancelledError):
+                    raise
+                raise gr.Error(f"生成失败: {result}")
+            images = result
 
-        if _cancel_event.is_set():
-            raise gr.CancelledError()
+            elapsed = time.time() - t0
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            img = images[0]
+            last_img = img
+            save_path = str(OUTPUT_DIR / f"zimage_{ts}.png")
+            img.save(save_path)
+            saved_paths.append(save_path)
+            log_lines.append(f"[{time.strftime('%H:%M:%S')}] 已保存: {save_path}")
 
-        elapsed = time.time() - t0
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        img = images[0]
-        save_path = str(OUTPUT_DIR / f"zimage_{ts}.png")
-        img.save(save_path)
-        log_lines.append(f"[{time.strftime('%H:%M:%S')}] 已保存: {save_path}")
+            record = {
+                "id": len(history_state) + len(all_records),
+                "timestamp": ts,
+                "image_path": save_path,
+                "prompt": prompt,
+                "negative_prompt": neg_prompt or "",
+                "params": {
+                    "model": model_display_name,
+                    "width": width, "height": height,
+                    "steps": steps, "guidance_scale": guidance_scale,
+                    "seed": current_seed, "cfg_normalization": cfg_norm,
+                    "cfg_truncation": cfg_trunc, "max_seq_len": max_seq_len,
+                    "compile": use_compile, "attn_backend": attn_backend,
+                },
+                "elapsed": round(elapsed, 1),
+            }
+            all_records.append(record)
 
-        record = {
-            "id": len(history_state),
-            "timestamp": ts,
-            "image_path": save_path,
-            "prompt": prompt,
-            "negative_prompt": neg_prompt or "",
-            "params": {
-                "model": model_display_name,
-                "width": width, "height": height,
-                "steps": steps, "guidance_scale": guidance_scale,
-                "seed": seed, "cfg_normalization": cfg_norm,
-                "cfg_truncation": cfg_trunc, "max_seq_len": max_seq_len,
-                "compile": use_compile, "attn_backend": attn_backend,
-            },
-            "elapsed": round(elapsed, 1),
-        }
-        history_state = [record] + history_state
+        # save all records to history
+        history_state = all_records + history_state
         save_history(history_state)
         gallery = build_gallery(history_state)
         stats = get_system_stats()
 
+        total_elapsed = sum(r["elapsed"] for r in all_records)
+        first = all_records[0]
         detail_md = (
-            f"**提示词:** {prompt[:150]}{'…' if len(prompt)>150 else ''}\n\n"
-            f"**负向提示:** {neg_prompt[:100] or '(无)'}\n\n"
+            f"**提示词:** {first['prompt'][:150]}{'…' if len(first['prompt'])>150 else ''}\n\n"
+            f"**负向提示:** {first['negative_prompt'][:100] or '(无)'}\n\n"
             f"**模型:** {model_display_name} | **尺寸:** {width}×{height} | "
-            f"**步数:** {steps} | **CFG:** {guidance_scale} | **种子:** {seed}\n\n"
-            f"⏱ **耗时:** {elapsed:.1f}s | "
-            f"**编译:** {'✅' if use_compile else '❌'} | **Attention:** {attn_backend}"
+            f"**步数:** {steps} | **CFG:** {guidance_scale}"
         )
+        if batch_count > 1:
+            detail_md += f"\n\n📦 **批量:** {batch_count} 张 | **总耗时:** {total_elapsed:.1f}s"
+        else:
+            detail_md += f" | **种子:** {all_records[0]['params']['seed']}\n\n"
+            detail_md += f"⏱ **耗时:** {all_records[0]['elapsed']:.1f}s"
+        detail_md += f"\n**编译:** {'✅' if use_compile else '❌'} | **Attention:** {attn_backend}"
 
         yield (
-            img,
+            last_img,
             f'<div style="display:flex;align-items:center;gap:12px;padding:6px 12px;background:var(--background-fill-secondary);border-radius:6px;color:#4caf50;font-family:monospace;font-size:0.85rem">'
-            f'<span>✅ 完成</span><span style="margin-left:auto;color:#aaa">{elapsed:.1f}s</span></div>',
-            f"⏱ 总耗时: **{elapsed:.1f}秒** | Steps: {steps} | CFG: {guidance_scale} | Seed: {seed}",
+            f'<span>✅ 完成 {batch_count} 张</span><span style="margin-left:auto;color:#aaa">{total_elapsed:.1f}s</span></div>',
+            f"⏱ 总耗时: **{total_elapsed:.1f}秒** | {batch_count} 张 | Steps: {steps} | CFG: {guidance_scale}",
             history_state, gallery, detail_md,
-            stats, save_path,
+            stats, saved_paths[0],
             "\n".join(log_lines[-20:]),
         )
 
@@ -666,19 +738,26 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
         image_path = r["image_path"]
         return (
             image_path if Path(image_path).exists() else None,
-            r["prompt"],
+            r["prompt"] if r["prompt"] else "",
+            r["prompt"] if r["prompt"] else "",
             detail,
         )
 
-    # ── 事件绑定 ──────────────────────────────
+    # ── Tab 切换 → 更新 mode_state ──────────
+    tab_txt.select(fn=lambda: "txt2img", outputs=mode_state)
+    tab_img.select(fn=lambda: "img2img", outputs=mode_state)
+
+    # ── 生成 ──────────────────────────────────
     gen_event = gen_btn.click(
         fn=generate_image,
         inputs=[
-            prompt, neg_prompt, model_choice,
+            mode_state,
+            prompt_txt, neg_txt, prompt_img, neg_img, init_image, strength,
+            model_choice,
             width, height, steps, guidance_scale,
             cfg_norm, cfg_trunc, max_seq_len, seed,
             use_compile, attn_backend,
-            history_state, stage_log_state,
+            history_state, stage_log_state, batch_count,
         ],
         outputs=[
             output_image, stage_display, elapsed_display,
@@ -693,29 +772,37 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
     history_gallery.select(
         fn=select_history,
         inputs=history_state,
-        outputs=[output_image, prompt, history_detail],
+        outputs=[output_image, prompt_txt, prompt_img, history_detail],
     )
 
     clear_btn.click(
         fn=lambda: (
-            "", "", MODEL_CHOICES[0],
+            "txt2img",
+            "", "", "", "", None, 0.8,
+            MODEL_CHOICES[0],
             1920, 1080, 8, 0.0, -1,
             False, 1.0, 512,
             False, "native",
+            [],
+            "",
+            1,
             None,
             '<div style="color:#888;font-family:monospace;font-size:0.85rem;padding:6px 12px;background:var(--background-fill-secondary);border-radius:6px">就绪</div>',
             "",
-            [], [],
+            [],
             "点击上方缩略图查看参数详情",
             get_system_stats(), "", "等待生成...",
         ),
         outputs=[
-            prompt, neg_prompt, model_choice,
+            mode_state,
+            prompt_txt, neg_txt, prompt_img, neg_img, init_image, strength,
+            model_choice,
             width, height, steps, guidance_scale, seed,
             cfg_norm, cfg_trunc, max_seq_len,
             use_compile, attn_backend,
+            history_state, stage_log_state, batch_count,
             output_image, stage_display, elapsed_display,
-            history_state, history_gallery, history_detail,
+            history_gallery, history_detail,
             system_monitor, save_path, log_output,
         ],
     )
