@@ -1,23 +1,28 @@
-"""Z-Image Web UI — 干净布局版"""
+"""Z-Image Web UI — 完整版（模型库·介绍·自动下载·回档）"""
 import json, os, time, warnings, threading
 from pathlib import Path
+from collections import OrderedDict
 
 import torch
 import gradio as gr
 import psutil
 
 warnings.filterwarnings("ignore")
-from utils import ensure_model_weights, load_from_local_dir, set_attention_backend
+from utils import ensure_model_weights, load_from_local_dir, set_attention_backend, load_sharded_safetensors
 from zimage import generate
+from zimage.transformer import ZImageTransformer2DModel
 
 os.environ["ZIMAGE_ATTENTION"] = os.environ.get("ZIMAGE_ATTENTION", "native")
 DTYPE = torch.bfloat16
 VAE_SCALE = 16
 
-DEFAULT_MODELS = {
-    "Z-Image-Turbo": {"repo": "Tongyi-MAI/Z-Image-Turbo", "path": "ckpts/Z-Image-Turbo"},
-    "Z-Image":       {"repo": "Tongyi-MAI/Z-Image",       "path": "ckpts/Z-Image"},
-}
+HISTORY_FILE = Path("outputs/history.json")
+OUTPUT_DIR = Path("outputs")
+OUTPUT_DIR.mkdir(exist_ok=True)
+CKPT_DIR = Path("ckpts")
+CKPT_DIR.mkdir(exist_ok=True)
+COMMUNITY_DIR = CKPT_DIR / "community"
+COMMUNITY_DIR.mkdir(exist_ok=True)
 
 ATTENTION_OPTIONS = [
     ("native（默认）", "native"),
@@ -25,15 +30,123 @@ ATTENTION_OPTIONS = [
     ("Flash Attn 2", "flash"),
     ("Flash Attn 3", "_flash_3"),
 ]
-HISTORY_FILE = Path("outputs/history.json")
-OUTPUT_DIR   = Path("outputs")
-OUTPUT_DIR.mkdir(exist_ok=True)
-CKPT_DIR = Path("ckpts")
-CKPT_DIR.mkdir(exist_ok=True)
 
 _cache = {}
 _device = None
 _cancel_event = threading.Event()
+
+# ── 模型库 ──────────────────────────────────────
+MODEL_REGISTRY = OrderedDict()
+
+def _reg(key, display, group, repo, path, desc, steps, cfg, dtype, source_url=None, file_name=None):
+    MODEL_REGISTRY[key] = {
+        "display": display, "group": group,
+        "repo": repo, "path": path,
+        "desc": desc, "steps": steps, "cfg": cfg,
+        "dtype": dtype,
+        "source_url": source_url, "file_name": file_name,
+    }
+
+# ── 官方模型（HuggingFace 自动下载）─────────────
+_reg("Z-Image-Turbo",
+     "🏛 Z-Image-Turbo", "官方",
+     "Tongyi-MAI/Z-Image-Turbo", "ckpts/Z-Image-Turbo",
+     "阿里通义实验室官方发布的**蒸馏快速版本**，仅需 **8 步**推理即可生成高质量图片。"
+     "擅长写实照片风格、精准的中英文文字渲染。在 Artificial Analysis 排行榜上位列开源模型 **第 1 名**。\n\n"
+     "⚡ 步数: 8  |  CFG: 0  |  显存: ≥16GB  |  ✓ 已下载",
+     8, 0.0, "auto")
+
+_reg("Z-Image",
+     "🏛 Z-Image", "官方",
+     "Tongyi-MAI/Z-Image", "ckpts/Z-Image",
+     "阿里通义实验室官方发布的**基础模型**，需 **50 步**推理。支持丰富的艺术风格、"
+     "多样的构图和精确的负向提示。适合创意生成和 LoRA 微调。\n\n"
+     "⚡ 步数: 28-50  |  CFG: 3-5  |  显存: ≥16GB",
+     50, 4.0, "auto")
+
+_reg("Comfy-Org Z-Image-Turbo",
+     "🏛 Z-Image-Turbo (社区镜像)", "官方",
+     "Comfy-Org/z_image_turbo", "ckpts/Comfy-Org_z_image_turbo",
+     "ComfyUI 团队维护的官方模型镜像仓库，内容与官方一致，适用于 ComfyUI 工作流。\n\n"
+     "⚡ 步数: 8  |  CFG: 0  |  显存: ≥16GB",
+     8, 0.0, "auto")
+
+# ── 社区模型（HuggingFace 自动下载）─────────────
+_reg("Z-Image-De-Turbo",
+     "🔧 Z-Image De-Turbo（可训练）", "社区",
+     "ostris/Z-Image-De-Turbo", "ckpts/Z-Image-De-Turbo",
+     "社区制作的**去蒸馏版本**，移除了 Turbo 的蒸馏加速，恢复为完整的 50 步扩散过程。"
+     "适合用于 **LoRA 训练** 和自定义微调，训练后无需特殊适配器即可推理。\n\n"
+     "⚡ 步数: 20-30  |  CFG: 2-3  |  显存: ≥16GB",
+     25, 2.5, "auto")
+
+_reg("Z-Image-Turbo-FP8",
+     "🔧 Z-Image-Turbo FP8（低显存）", "社区",
+     "Kijai/Z-Image-Turbo-fp8", "ckpts/Z-Image-Turbo-FP8",
+     "使用 FP8 量化压缩的 Turbo 版本，模型体积从 12GB 降至约 **6GB**，显存需求大幅降低。"
+     "适合 **6-8GB 显存**的显卡（如 RTX 3060/4060）。画质损失极小。\n\n"
+     "⚡ 步数: 8  |  CFG: 0  |  显存: ≥8GB",
+     8, 0.0, "auto")
+
+# ── 社区模型（CivitAI 单文件，需手动下载）───────
+_reg("Juggernaut-Z",
+     "⭐ Juggernaut Z（写实微调）", "社区热门",
+     None, "ckpts/community/juggernaut_z",
+     "由 RunDiffusion 团队出品的**写实风格微调**模型。Juggernaut 系列是 Stable Diffusion 时代最知名的写实模型品牌，"
+     "本次基于 Z-Image Base 微调，继承了优秀的写实照片质感、自然皮肤纹理和光影效果。\n\n"
+     "📥 从 CivitAI 下载: civitai.com/models/2600510\n"
+     "⚡ 步数: 8-15  |  CFG: 1-2  |  显存: ≥12GB",
+     10, 1.5, "manual",
+     "https://civitai.com/models/2600510/juggernaut-z",
+     "juggernaut_z.safetensors")
+
+_reg("unStable-Revolution-ZIT",
+     "⭐ unStable Revolution ZIT（写实+NSFW）", "社区热门",
+     None, "ckpts/community/unstable_revolution_zit",
+     "社区热门微调模型，基于 Z-Image Turbo 进行写实增强，显著改善了人物皮肤质感和细节，"
+     "支持 NSFW 内容生成。在 CivitAI 上有 **3.8 万**下载量。\n\n"
+     "📥 从 CivitAI 下载: civitai.com/models/2193942\n"
+     "⚡ 步数: 8-10  |  CFG: 1-2  |  显存: ≥12GB",
+     8, 1.0, "manual",
+     "https://civitai.com/models/2193942/unstable-revolution-zit",
+     "unstable_revolution_zit.safetensors")
+
+_reg("ZOMG",
+     "⭐ ZOMG（风格融合）", "社区热门",
+     None, "ckpts/community/zomg",
+     "融合多种风格 LoRA 的精调模型，解决了原始模型皮肤斑驳的问题，生成更美观、更稳定的图片。"
+     "同时支持 SFW 和 NSFW 内容。\n\n"
+     "📥 从 CivitAI 下载: civitai.com/models/2314752\n"
+     "⚡ 步数: 8-12  |  CFG: 1-2  |  显存: ≥12GB",
+     10, 1.5, "manual",
+     "https://civitai.com/models/2314752/zomg-z-image-turbo-sfw-nsfw",
+     "zomg.safetensors")
+
+_reg("Z-Image-Turbo-Clear",
+     "⭐ Z-Image-Turbo Clear（细节增强）", "社区热门",
+     None, "ckpts/community/z_image_clear",
+     "针对 Z-Image-Turbo 的**细节增强**微调版，提升了原始模型的细节表现力，"
+     "适合对画质有更高要求的场景。配有专用 VAE。\n\n"
+     "📥 从 CivitAI 下载: civitai.com/models/2197598\n"
+     "⚡ 步数: 9  |  CFG: 1  |  显存: ≥12GB",
+     9, 1.0, "manual",
+     "https://civitai.com/models/2197598/z-image-turboclear",
+     "z_image_clear.safetensors")
+
+_reg("Swift-ZIT",
+     "⭐ SWIFT（快速+细节）", "社区热门",
+     None, "ckpts/community/swift_zit",
+     "注重生成速度同时提升细节表现的模型。改善了 Z-Image Turbo 的女性面部多样性。"
+     "GGUF 格式，加载更快。\n\n"
+     "📥 从 CivitAI 下载: civitai.com/models/2534952\n"
+     "⚡ 步数: 8-10  |  CFG: 1  |  显存: ≥8GB",
+     8, 1.0, "manual",
+     "https://civitai.com/models/2534952/swift-fast-and-detailed-zit-model",
+     "swift_zit.safetensors")
+
+# 下拉选项
+MODEL_CHOICES = [v["display"] for v in MODEL_REGISTRY.values()]
+MODEL_CHOICES_DICT = {v["display"]: k for k, v in MODEL_REGISTRY.items()}
 
 
 def get_device():
@@ -50,55 +163,164 @@ def get_device():
 
 
 def scan_local_models():
-    models = dict(DEFAULT_MODELS)
-    if CKPT_DIR.exists():
-        for subdir in CKPT_DIR.iterdir():
-            if subdir.is_dir() and (subdir / "transformer").is_dir():
-                name = subdir.name
-                if name not in models:
-                    models[name] = {"repo": None, "path": str(subdir)}
-    return models
+    """检测本地已下载的模型，返回已下载的 key 集合"""
+    downloaded = set()
+    for key, cfg in MODEL_REGISTRY.items():
+        p = Path(cfg["path"])
+        if cfg["dtype"] == "auto":
+            # 检查完整目录结构
+            if (p / "transformer").is_dir():
+                downloaded.add(key)
+        else:
+            # 检查单文件
+            if p.is_dir():
+                for f in p.iterdir():
+                    if f.suffix in (".safetensors", ".bin", ".pt"):
+                        downloaded.add(key)
+                        break
+    return downloaded
 
 
-MODEL_CONFIGS = scan_local_models()
+def get_model_info(model_display_name):
+    """根据下拉显示名获取模型详情"""
+    if model_display_name not in MODEL_CHOICES_DICT:
+        return None
+    key = MODEL_CHOICES_DICT[model_display_name]
+    return MODEL_REGISTRY.get(key)
 
 
-def refresh_model_list():
-    global MODEL_CONFIGS
-    MODEL_CONFIGS = scan_local_models()
-    choices = list(MODEL_CONFIGS.keys())
-    return gr.Dropdown(choices=choices, value=choices[0] if choices else None)
+def build_model_info_html(model_display_name):
+    """构建模型介绍 HTML 卡片"""
+    info = get_model_info(model_display_name)
+    if info is None:
+        return "请选择一个模型"
+    downloaded = scan_local_models()
+    key = MODEL_CHOICES_DICT[model_display_name]
+    is_downloaded = key in downloaded
+    status_icon = "✅ 已下载" if is_downloaded else "⬇️ 未下载"
+    if info["dtype"] == "auto":
+        download_hint = "选择后点击「自动下载」即可从 HuggingFace 拉取"
+    else:
+        download_hint = (f'需从 CivitAI 手动下载 → <a href="{info["source_url"]}" target="_blank">点击前往</a><br>'
+                         f'下载后将文件放入: <code>{info["path"]}</code>')
+
+    cfg_note = f'CFG 建议设为 <b>{info["cfg"]}</b>' if info["cfg"] > 0 else '<b>CFG=0</b>（Turbo 模型不支持 CFG）'
+    return f"""
+    <div style="background:var(--background-fill-secondary);border-radius:10px;padding:12px 16px;font-size:0.9rem;line-height:1.6">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <span style="font-weight:bold;font-size:1rem">{info["display"]}</span>
+        <span style="font-size:0.85rem;padding:2px 10px;border-radius:12px;background:{"#4caf50" if is_downloaded else "#666"};color:#fff">{status_icon}</span>
+      </div>
+      <div style="color:#ccc">{info["desc"]}</div>
+      <div style="margin-top:8px;padding-top:8px;border-top:1px solid #444;color:#aaa;font-size:0.85rem">
+        {cfg_note}  |  步数: <b>{info["steps"]}</b>  |  {download_hint}
+      </div>
+    </div>"""
 
 
 def load_model(model_key: str, use_compile: bool = False, attn_backend: str = "native"):
+    """加载模型（支持 auto 和 manual 两种类型）"""
     cache_key = f"{model_key}_c{use_compile}_a{attn_backend}"
     if cache_key in _cache:
         return _cache[cache_key]
 
-    if model_key not in MODEL_CONFIGS:
-        repo_id = model_key
-        local_path = str(CKPT_DIR / model_key.replace("/", "_"))
-        cfg = {"repo": repo_id, "path": local_path}
-        MODEL_CONFIGS[model_key] = cfg
-    else:
-        cfg = MODEL_CONFIGS[model_key]
+    if model_key not in MODEL_REGISTRY:
+        raise gr.Error(f"未知模型: {model_key}")
 
+    cfg = MODEL_REGISTRY[model_key]
     device = get_device()
-    if cfg["repo"]:
-        mp = ensure_model_weights(cfg["path"], repo_id=cfg["repo"], verify=False)
-    else:
-        mp = Path(cfg["path"])
-        if not mp.exists():
-            raise gr.Error(f"模型目录不存在: {mp}，请先下载或指定 HuggingFace repo ID")
-
     os.environ["ZIMAGE_ATTENTION"] = attn_backend
-    comp = load_from_local_dir(mp, device=device, dtype=DTYPE, compile=use_compile)
+
+    if cfg["dtype"] == "auto":
+        # HuggingFace 完整目录结构
+        if cfg["repo"]:
+            mp = ensure_model_weights(cfg["path"], repo_id=cfg["repo"], verify=False)
+        else:
+            mp = Path(cfg["path"])
+            if not mp.exists():
+                raise gr.Error(f"模型目录不存在: {mp}")
+        comp = load_from_local_dir(mp, device=device, dtype=DTYPE, compile=use_compile)
+    else:
+        # 社区单文件模型
+        comp = _load_single_file_model(model_key, device, use_compile)
+
     comp["text_encoder"] = comp["text_encoder"].to("cpu")
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     set_attention_backend(attn_backend)
     _cache[cache_key] = comp
     return comp
+
+
+def _load_single_file_model(model_key: str, device: str, use_compile: bool):
+    """加载社区单文件 safetensors 模型"""
+    cfg = MODEL_REGISTRY[model_key]
+    model_dir = Path(cfg["path"])
+
+    # 找 safetensors 文件
+    safetensors_files = list(model_dir.glob("*.safetensors")) + list(model_dir.glob("*.bin")) + list(model_dir.glob("*.pt"))
+    if not safetensors_files:
+        raise gr.Error(f"在 {model_dir} 中未找到模型文件。请先从 CivitAI 下载并放入该目录。\n"
+                       f"下载地址: {cfg['source_url']}")
+
+    # 使用 Z-Image-Turbo 作为基础框架（复用 VAE、text_encoder、scheduler）
+    base_path = CKPT_DIR / "Z-Image-Turbo"
+    if not base_path.exists():
+        # 尝试自动下载
+        ensure_model_weights(str(base_path), repo_id="Tongyi-MAI/Z-Image-Turbo", verify=False)
+
+    # 先加载基础组件（不含 transformer）
+    base_comp = load_from_local_dir(base_path, device=device, dtype=DTYPE, compile=False)
+
+    # 替换 transformer 权重
+    from config import (
+        DEFAULT_TRANSFORMER_PATCH_SIZE, DEFAULT_TRANSFORMER_F_PATCH_SIZE,
+        DEFAULT_TRANSFORMER_IN_CHANNELS, DEFAULT_TRANSFORMER_DIM,
+        DEFAULT_TRANSFORMER_N_LAYERS, DEFAULT_TRANSFORMER_N_REFINER_LAYERS,
+        DEFAULT_TRANSFORMER_N_HEADS, DEFAULT_TRANSFORMER_N_KV_HEADS,
+        DEFAULT_TRANSFORMER_NORM_EPS, DEFAULT_TRANSFORMER_QK_NORM,
+        DEFAULT_TRANSFORMER_CAP_FEAT_DIM, ROPE_THETA,
+        DEFAULT_TRANSFORMER_T_SCALE, ROPE_AXES_DIMS, ROPE_AXES_LENS,
+    )
+
+    # 从 base 模型的 transformer config 创建新 transformer
+    transformer_dir = base_path / "transformer"
+    import json
+    config = json.loads((transformer_dir / "config.json").read_text())
+
+    with torch.device("meta"):
+        transformer = ZImageTransformer2DModel(
+            all_patch_size=tuple(config.get("all_patch_size", DEFAULT_TRANSFORMER_PATCH_SIZE)),
+            all_f_patch_size=tuple(config.get("all_f_patch_size", DEFAULT_TRANSFORMER_F_PATCH_SIZE)),
+            in_channels=config.get("in_channels", DEFAULT_TRANSFORMER_IN_CHANNELS),
+            dim=config.get("dim", DEFAULT_TRANSFORMER_DIM),
+            n_layers=config.get("n_layers", DEFAULT_TRANSFORMER_N_LAYERS),
+            n_refiner_layers=config.get("n_refiner_layers", DEFAULT_TRANSFORMER_N_REFINER_LAYERS),
+            n_heads=config.get("n_heads", DEFAULT_TRANSFORMER_N_HEADS),
+            n_kv_heads=config.get("n_kv_heads", DEFAULT_TRANSFORMER_N_KV_HEADS),
+            norm_eps=config.get("norm_eps", DEFAULT_TRANSFORMER_NORM_EPS),
+            qk_norm=config.get("qk_norm", DEFAULT_TRANSFORMER_QK_NORM),
+            cap_feat_dim=config.get("cap_feat_dim", DEFAULT_TRANSFORMER_CAP_FEAT_DIM),
+            rope_theta=config.get("rope_theta", ROPE_THETA),
+            t_scale=config.get("t_scale", DEFAULT_TRANSFORMER_T_SCALE),
+            axes_dims=config.get("axes_dims", ROPE_AXES_DIMS),
+            axes_lens=config.get("axes_lens", ROPE_AXES_LENS),
+        ).to(DTYPE)
+
+    # 加载 safetensors 权重
+    state_dict = load_sharded_safetensors(model_dir, device="cpu", dtype=DTYPE)
+    transformer.load_state_dict(state_dict, strict=False, assign=True)
+    del state_dict
+    transformer = transformer.to(device)
+    transformer.eval()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    if use_compile:
+        transformer = torch.compile(transformer)
+
+    base_comp["transformer"] = transformer
+    return base_comp
 
 
 def get_system_stats():
@@ -134,50 +356,6 @@ def build_gallery(records):
     return items
 
 
-def format_stage_log(pct, desc, elapsed_list):
-    stages = [
-        ("📝 编码文本", 0.00, 0.04),
-        ("🔄 去噪",     0.05, 0.84),
-        ("🎨 解码 VAE", 0.85, 0.99),
-        ("✅ 完成",     1.00, 1.00),
-    ]
-    lines = []
-    for label, start, end in stages:
-        if desc.startswith("📝"):
-            active = True
-        elif desc.startswith("🔄"):
-            active = start <= pct
-        elif desc.startswith("🎨"):
-            active = pct >= 0.85
-        elif desc.startswith("✅"):
-            active = pct >= 1.0
-        else:
-            active = False
-
-        if desc.startswith("🔄") and label == "🔄 去噪":
-            step_info = desc.replace("🔄 ", "")
-            lines.append(
-                f'<span style="color:{"#4caf50" if pct>=end else "#555"};font-size:14px">{"✓" if pct>=end else "○"}</span>'
-                f'<span style="color:{"#fff" if active else "#888"}">{label}</span>'
-                f'<span style="color:#aaa;font-size:0.85rem;margin:0 4px">{step_info}</span>'
-            )
-        else:
-            done = (label == "📝 编码文本" and pct >= 0.05) or \
-                   (label == "🎨 解码 VAE" and pct >= 0.85) or \
-                   (label == "✅ 完成" and pct >= 1.0)
-            lines.append(
-                f'<span style="color:{"#4caf50" if done else "#555"};font-size:14px">{"✓" if done else "○"}</span>'
-                f'<span style="color:{"#fff" if active else "#888"}">{label}</span>'
-            )
-        lines.append('<span style="color:#444;margin:0 4px">|</span>')
-    bar_pct = max(2, int(pct * 100))
-    bar = (f'<div style="margin-top:6px;height:4px;background:#333;border-radius:2px;overflow:hidden">'
-           f'<div style="width:{bar_pct}%;height:100%;background:linear-gradient(90deg,#4caf50,#8bc34a);border-radius:2px;transition:width 0.3s"></div></div>')
-    elapsed = f'<span style="margin-left:auto;color:#aaa;font-size:0.85rem">{elapsed_list[-1] if elapsed_list else ""}s</span>'
-    inner = "".join(lines) + elapsed
-    return f'<div style="display:flex;align-items:center;gap:2px;flex-wrap:wrap;font-family:monospace;font-size:0.9rem">{inner}</div>{bar}'
-
-
 CSS = """
 .gradio-container{max-width:1500px!important;margin:auto!important}
 .output-img img{border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,0.3)}
@@ -187,28 +365,26 @@ CSS = """
 
 with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as demo:
     gr.Markdown("""# ⚡ Z-Image 文生图  ·  阿里巴巴通义实验室
-<small style="color:#888">输入提示词 → 选择模型 → 生成图片 · 支持取消/自定义模型/自动下载</small>""")
+<small style="color:#888">输入提示词 → 选择模型 → 生成图片 · 支持取消/自定义模型/自动下载/社区模型</small>""")
 
     history_state = gr.State([])
-    stage_log_state = gr.State([])
+    model_info_state = gr.State("")
 
     with gr.Row(equal_height=False):
-        # ======== 左栏 ========
         with gr.Column(scale=2, min_width=400):
             prompt = gr.Textbox(label="📝 提示词", placeholder="描述你想要的图片…", lines=4)
             neg_prompt = gr.Textbox(label="➖ 负向提示词（可选）", lines=2)
 
             gr.Markdown("### 🤖 模型", elem_classes="section-divider")
             model_choice = gr.Dropdown(
-                choices=list(MODEL_CONFIGS.keys()),
-                value="Z-Image-Turbo" if "Z-Image-Turbo" in MODEL_CONFIGS else (list(MODEL_CONFIGS.keys())[0] if MODEL_CONFIGS else None),
-                allow_custom_value=True,
-                label="选择或输入 HuggingFace repo ID",
+                choices=MODEL_CHOICES,
+                value=MODEL_CHOICES[0],
+                label="选择模型",
             )
+            model_info = gr.HTML(value=build_model_info_html(MODEL_CHOICES[0]))
             with gr.Row():
-                refresh_models_btn = gr.Button("🔄 刷新本地", size="sm", scale=1)
+                refresh_models_btn = gr.Button("🔄 刷新状态", size="sm", scale=1)
                 download_btn = gr.Button("📥 自动下载", size="sm", scale=1, variant="primary")
-            model_status = gr.Markdown("")
 
             gr.Markdown("### ⚙️ 参数", elem_classes="section-divider")
             with gr.Row():
@@ -238,12 +414,9 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
 
             system_monitor = gr.HTML(value=get_system_stats(), elem_classes="stat-card")
 
-        # ======== 右栏 ========
         with gr.Column(scale=3, min_width=500):
             output_image = gr.Image(label="生成结果", type="pil", height=520, elem_classes="output-img")
-            stage_display = gr.HTML(
-                value='<div style="color:#666;font-family:monospace;font-size:0.9rem;padding:4px 0">就绪</div>',
-            )
+            stage_display = gr.HTML(value='<div style="color:#666;font-family:monospace;font-size:0.9rem">就绪</div>')
             elapsed_display = gr.Markdown("")
 
             gr.Markdown("### 🖼 历史记录", elem_classes="section-divider")
@@ -253,7 +426,6 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
             )
             history_detail = gr.Markdown("点击上方缩略图查看参数详情")
 
-    # ======== 底部日志 ========
     log_output = gr.Textbox(
         label="📋 生成日志", lines=5, max_lines=10,
         value="等待生成...", interactive=False,
@@ -261,26 +433,45 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
     save_path = gr.Textbox(label="保存路径", visible=False)
 
     # ── 事件 ──────────────────────────────────
-    refresh_models_btn.click(fn=refresh_model_list, outputs=model_choice).then(
-        fn=lambda: "✅ 本地模型已刷新", outputs=model_status,
-    )
 
-    def download_model(repo_id):
-        if not repo_id or not repo_id.strip():
-            return "❌ 请输入有效 repo ID"
-        repo_id = repo_id.strip()
-        local_path = str(CKPT_DIR / repo_id.replace("/", "_"))
+    # 模型选中 → 更新介绍卡片
+    def on_model_select(display_name):
+        if display_name is None:
+            return build_model_info_html(MODEL_CHOICES[0])
+        return build_model_info_html(display_name)
+
+    model_choice.change(fn=on_model_select, inputs=model_choice, outputs=model_info)
+
+    # 刷新状态
+    def refresh_status():
+        downloaded = scan_local_models()
+        return f"已扫描本地模型，共 {len(downloaded)} 个已下载"
+
+    refresh_models_btn.click(fn=refresh_status, outputs=model_info)
+
+    # 自动下载
+    def download_selected(display_name):
+        if display_name not in MODEL_CHOICES_DICT:
+            return "❌ 无效的模型选择"
+        key = MODEL_CHOICES_DICT[display_name]
+        cfg = MODEL_REGISTRY.get(key)
+        if cfg is None:
+            return "❌ 模型未找到"
+        if cfg["dtype"] != "auto":
+            return (f'⚠️ 该模型为社区单文件版本，请手动从 CivitAI 下载:\n'
+                    f'{cfg["source_url"]}\n\n放入目录: {cfg["path"]}')
+
         try:
-            ensure_model_weights(local_path, repo_id=repo_id, verify=False)
-            refresh_model_list()
-            return f"✅ 下载完成: {repo_id}"
+            ensure_model_weights(cfg["path"], repo_id=cfg["repo"], verify=False)
+            return f"✅ 下载完成: {cfg['display']}"
         except Exception as e:
             return f"❌ 下载失败: {e}"
 
-    download_btn.click(fn=download_model, inputs=model_choice, outputs=model_status)
+    download_btn.click(fn=download_selected, inputs=model_choice, outputs=model_info)
 
+    # 生成
     def generate_image(
-        prompt, neg_prompt, model_choice,
+        prompt, neg_prompt, model_display_name,
         width, height, steps, guidance_scale,
         cfg_norm, cfg_trunc, max_seq_len, seed,
         use_compile, attn_backend,
@@ -289,21 +480,34 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
     ):
         if not prompt or not prompt.strip():
             raise gr.Error("请输入提示词")
+
+        # 解析模型 key
+        if model_display_name not in MODEL_CHOICES_DICT:
+            raise gr.Error(f"未知模型: {model_display_name}")
+        model_key = MODEL_CHOICES_DICT[model_display_name]
+
         width = (width // VAE_SCALE) * VAE_SCALE
         height = (height // VAE_SCALE) * VAE_SCALE
         _cancel_event.clear()
         device = get_device()
 
         progress(0, desc="加载模型中...")
-        log_lines = [f"[{time.strftime('%H:%M:%S')}] 加载模型: {model_choice}"]
+        log_lines = [f"[{time.strftime('%H:%M:%S')}] 加载模型: {model_display_name}"]
         try:
-            comp = load_model(model_choice, use_compile, attn_backend)
+            comp = load_model(model_key, use_compile, attn_backend)
             log_lines.append(f"[{time.strftime('%H:%M:%S')}] 模型就绪 ✅")
         except Exception as e:
             raise gr.Error(f"模型加载失败: {e}")
 
         if _cancel_event.is_set():
             raise gr.CancelledError()
+
+        # 根据模型建议自动调整参数
+        model_cfg = MODEL_REGISTRY[model_key]
+        if steps == 8 and model_cfg["steps"] != 8 and steps == model_cfg["steps"]:
+            pass  # 用户已手动调整
+        if guidance_scale == 0.0 and model_cfg["cfg"] > 0:
+            guidance_scale = model_cfg["cfg"]
 
         use_cfg = guidance_scale > 1.0
         gen = torch.Generator(device).manual_seed(seed) if seed >= 0 else None
@@ -316,7 +520,7 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
             progress(pct, desc=desc)
 
         t0 = time.time()
-        log_lines.append(f"[{time.strftime('%H:%M:%S')}] 开始生成 ({width}x{height}, {steps}步, CFG={guidance_scale})")
+        log_lines.append(f"[{time.strftime('%H:%M:%S')}] 开始 ({width}x{height}, {steps}步, CFG={guidance_scale})")
         progress(0.01, desc="📝 编码文本...")
         try:
             images = generate(
@@ -354,7 +558,7 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
             "prompt": prompt,
             "negative_prompt": neg_prompt or "",
             "params": {
-                "model": model_choice,
+                "model": model_display_name,
                 "width": width, "height": height,
                 "steps": steps, "guidance_scale": guidance_scale,
                 "seed": seed, "cfg_normalization": cfg_norm,
@@ -368,18 +572,21 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
         gallery = build_gallery(history_state)
         stats = get_system_stats()
 
-        stage_html = format_stage_log(1.0, "✅ 完成", [round(elapsed, 1)])
         detail_md = (
             f"**提示词:** {prompt[:150]}{'…' if len(prompt)>150 else ''}\n\n"
             f"**负向提示:** {neg_prompt[:100] or '(无)'}\n\n"
-            f"**模型:** {model_choice} | **尺寸:** {width}×{height} | "
+            f"**模型:** {model_display_name} | **尺寸:** {width}×{height} | "
             f"**步数:** {steps} | **CFG:** {guidance_scale} | **种子:** {seed}\n\n"
             f"⏱ **耗时:** {elapsed:.1f}s | "
             f"**编译:** {'✅' if use_compile else '❌'} | **Attention:** {attn_backend}"
         )
 
         return (
-            img, stage_html,
+            img,
+            f'<div style="display:flex;align-items:center;gap:2px;flex-wrap:wrap;color:#4caf50;font-family:monospace;font-size:0.9rem">'
+            f'<span>✅ 完成</span><span style="margin-left:auto;color:#aaa">{elapsed:.1f}s</span></div>'
+            f'<div style="margin-top:4px;height:4px;background:#333;border-radius:2px;overflow:hidden">'
+            f'<div style="width:100%;height:100%;background:#4caf50;border-radius:2px"></div></div>',
             f"⏱ 总耗时: **{elapsed:.1f}秒** | Steps: {steps} | CFG: {guidance_scale} | Seed: {seed}",
             history_state, gallery, detail_md,
             stats, save_path,
@@ -436,12 +643,12 @@ with gr.Blocks(title="Z-Image 文生图", css=CSS, theme=gr.themes.Soft()) as de
 
     clear_btn.click(
         fn=lambda: (
-            "", "", "Z-Image-Turbo" if "Z-Image-Turbo" in MODEL_CONFIGS else (list(MODEL_CONFIGS.keys())[0] if MODEL_CONFIGS else ""),
+            "", "", MODEL_CHOICES[0],
             1024, 1024, 8, 0.0, -1,
             False, 1.0, 512,
             False, "native",
             None,
-            '<div style="color:#666;font-family:monospace;font-size:0.9rem;padding:4px 0">就绪</div>',
+            '<div style="color:#666;font-family:monospace;font-size:0.9rem">就绪</div>',
             "",
             [], [],
             "点击上方缩略图查看参数详情",
