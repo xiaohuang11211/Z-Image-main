@@ -433,13 +433,11 @@ def generate_img2img(
     if _progress_callback is not None:
         _progress_callback(0.05, "编码输入图像...")
 
-    vae.to(device)
-    latents = vae.encode(img_tensor, generator=generator)
+    latents = vae.encode(img_tensor.to(vae.dtype), generator=generator)
     if hasattr(vae.config, "shift_factor") and vae.config.shift_factor:
         latents = (latents - vae.config.shift_factor) * vae.config.scaling_factor
     else:
         latents = latents * vae.config.scaling_factor
-    vae.to("cpu")
 
     # --- timesteps ---
     height_latent = 2 * (int(height) // vae_scale)
