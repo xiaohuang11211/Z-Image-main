@@ -364,7 +364,8 @@ class AutoencoderKL(nn.Module):
         else:
             moments = h
         mean, logvar = moments.chunk(2, dim=1)
-        sample = mean + torch.exp(0.5 * logvar) * torch.randn_like(mean, generator=generator)
+        noise = torch.randn(mean.shape, dtype=mean.dtype, device=mean.device, generator=generator)
+        sample = mean + torch.exp(0.5 * logvar) * noise
         return sample.to(dtype=torch.float32)
 
     def decode(self, z: torch.FloatTensor, return_dict: bool = True) -> AutoencoderKLOutput:
