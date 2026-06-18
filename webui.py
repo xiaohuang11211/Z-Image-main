@@ -721,7 +721,7 @@ with gr.Blocks(title="Z-Image 文生图/图生图", css=CSS, theme=gr.themes.Sof
 
     def select_history(evt: gr.SelectData, history_state):
         if not history_state:
-            return None, "", ""
+            return "", "", ""
         idx = evt.index
         r = history_state[idx]
         p = r["params"]
@@ -735,9 +735,7 @@ with gr.Blocks(title="Z-Image 文生图/图生图", css=CSS, theme=gr.themes.Sof
             f"**编译:** {p.get('compile', 'N/A')} | **Attention:** {p.get('attn_backend', 'N/A')}\n\n"
             f"⏱ **耗时:** {r.get('elapsed','?')}秒 | 🕐 **时间:** {r['timestamp']}"
         )
-        image_path = r["image_path"]
         return (
-            image_path if Path(image_path).exists() else None,
             r["prompt"] if r["prompt"] else "",
             r["prompt"] if r["prompt"] else "",
             detail,
@@ -772,7 +770,7 @@ with gr.Blocks(title="Z-Image 文生图/图生图", css=CSS, theme=gr.themes.Sof
     history_gallery.select(
         fn=select_history,
         inputs=history_state,
-        outputs=[output_image, prompt_txt, prompt_img, history_detail],
+        outputs=[prompt_txt, prompt_img, history_detail],
     )
 
     clear_btn.click(
