@@ -616,13 +616,33 @@ with gr.Blocks(title="Z-Image 文生图/图生图", css=CSS, theme=gr.themes.Sof
                     (_yield.elapsed, desc, get_system_stats(), "\n".join(log_lines[-20:]))
                 )
 
+            def _thread_target(
+                rb,
+                _m, _p, _np, _ii, _st,
+                _mk, _comp, _w, _h, _steps, _g,
+                _cn, _ct, _ml, _sd, _dv,
+                _op,
+            ):
+                try:
+                    imgs = _run_one(
+                        _m, _p, _np, _ii, _st,
+                        _mk, _comp, _w, _h, _steps, _g,
+                        _cn, _ct, _ml, _sd, _dv,
+                        _op,
+                    )
+                    rb.append(imgs)
+                except BaseException as e:
+                    rb.append(e)
+
             t_gen = threading.Thread(
-                target=lambda: _result_box.append(
-                    _run_one(mode, prompt, neg_prompt, init_image, strength,
-                             model_key, comp, width, height, steps, guidance_scale,
-                             cfg_norm, cfg_trunc, max_seq_len, current_seed, device,
-                             on_progress)
-                ) or _result_box.append(None),
+                target=_thread_target,
+                args=(
+                    _result_box,
+                    mode, prompt, neg_prompt, init_image, strength,
+                    model_key, comp, width, height, steps, guidance_scale,
+                    cfg_norm, cfg_trunc, max_seq_len, current_seed, device,
+                    on_progress,
+                ),
                 daemon=True,
             )
             t_gen.start()
