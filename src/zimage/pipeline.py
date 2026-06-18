@@ -469,8 +469,9 @@ def generate_img2img(
     if _progress_callback is not None:
         _progress_callback(0.07, f"添加噪声 (强度={strength})")
 
-    noise = torch.randn(shape, generator=generator, device=device, dtype=torch.float32)
-    latents = scheduler.add_noise(latents, noise, timesteps[:1])
+    init_sigma = scheduler.sigmas[t_start].item() if hasattr(scheduler, "sigmas") else max(strength, 1e-3)
+    noise = torch.randn(latents.shape, dtype=latents.dtype, device=latents.device, generator=generator)
+    latents = (1.0 - init_sigma) * latents + init_sigma * noise
 
     # --- denoising loop ---
     from tqdm import tqdm
