@@ -12,6 +12,8 @@ from utils import ensure_model_weights, load_from_local_dir, set_attention_backe
 from zimage import generate, generate_img2img
 from zimage.transformer import ZImageTransformer2DModel
 
+class _Cancelled(BaseException):
+    """Generator cancelled by user"""
 os.environ["ZIMAGE_ATTENTION"] = os.environ.get("ZIMAGE_ATTENTION", "native")
 DTYPE = torch.bfloat16
 VAE_SCALE = 16
@@ -578,7 +580,7 @@ with gr.Blocks(title="Z-Image 文生图/图生图", css=CSS, theme=gr.themes.Sof
             raise gr.Error(f"模型加载失败: {e}")
 
         if _cancel_event.is_set():
-            raise gr.CancelledError()
+            raise _Cancelled()
 
         model_cfg = MODEL_REGISTRY[model_key]
         if steps == 8 and model_cfg["steps"] != 8 and steps == model_cfg["steps"]:
@@ -594,7 +596,7 @@ with gr.Blocks(title="Z-Image 文生图/图生图", css=CSS, theme=gr.themes.Sof
 
         for batch_i in range(batch_count):
             if _cancel_event.is_set():
-                raise gr.CancelledError()
+                raise _Cancelled()
 
             current_seed = -1 if seed_base < 0 else seed_base + batch_i
             batch_label = f" ({batch_i+1}/{batch_count})" if batch_count > 1 else ""
@@ -609,7 +611,7 @@ with gr.Blocks(title="Z-Image 文生图/图生图", css=CSS, theme=gr.themes.Sof
 
             def on_progress(pct, desc):
                 if _cancel_event.is_set():
-                    raise gr.CancelledError()
+                    raise _Cancelled()
                 _yield.elapsed = f"{time.time() - t0:.1f}"
                 log_lines.append(f"[{time.strftime('%H:%M:%S')}] {desc} ({_yield.elapsed}s)")
                 _immediate_queue.put_nowait(
@@ -671,12 +673,12 @@ with gr.Blocks(title="Z-Image 文生图/图生图", css=CSS, theme=gr.themes.Sof
                 time.sleep(0.25)
 
             if _cancel_event.is_set():
-                raise gr.CancelledError()
+                raise _Cancelled()
 
             # retrieve result
             result = _result_box[0] if _result_box else None
             if isinstance(result, BaseException):
-                if isinstance(result, gr.CancelledError):
+                if isinstance(result, _Cancelled):
                     raise
                 raise gr.Error(f"生成失败: {result}")
             images = result
