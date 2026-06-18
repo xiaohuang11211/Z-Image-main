@@ -462,8 +462,8 @@ def generate_img2img(
     )
 
     # --- add noise per strength ---
-    init_timestep = max(int(num_inference_steps * (1.0 - strength)), 1)
-    t_start = max(len(timesteps) - init_timestep, 0)
+    num_do_steps = max(int(num_inference_steps * strength), 1)
+    t_start = max(len(timesteps) - num_do_steps, 0)
     timesteps = timesteps[t_start:]
 
     if _progress_callback is not None:
@@ -550,7 +550,7 @@ def generate_img2img(
     logger.info("Decoding VAE...")
     shift_factor = getattr(vae.config, "shift_factor", 0.0) or 0.0
     latents = (latents.to(vae.dtype) / vae.config.scaling_factor) + shift_factor
-    image = vae.decode(latents.to(vae.device), return_dict=False)[0]
+    image = vae.decode(latents, return_dict=False)[0]
 
     if output_type == "pil":
         from PIL import Image as PILImage
