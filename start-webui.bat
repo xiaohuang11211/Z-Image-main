@@ -7,6 +7,8 @@ echo ========================================
 
 cd /d "%~dp0"
 
+set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 REM Find real Python (skip Windows Store stub)
 set PYTHON_CMD=
 where python /all >"%TEMP%\py_list.txt" 2>nul
@@ -26,7 +28,7 @@ if exist "C:\Python313\python.exe" set PYTHON_CMD=C:\Python313\python.exe
 :found
 if "%PYTHON_CMD%"=="" (
     echo [!] Python not found. Trying auto-install...
-    powershell -NoProfile -ExecutionPolicy Bypass -File "启动webui.ps1"
+    powershell -NoProfile -ExecutionPolicy Bypass -File "start.ps1"
     if errorlevel 1 (
         echo [!] Auto-install failed. Please install Python 3.10+ from python.org
         pause

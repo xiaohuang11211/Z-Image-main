@@ -84,7 +84,7 @@ def generate(
     output_type: str = "pil",
     _progress_callback: Optional[Callable[[float, str], None]] = None,
 ):
-    device = next(transformer.parameters()).device
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     if hasattr(vae, "config") and hasattr(vae.config, "block_out_channels"):
         vae_scale_factor = 2 ** (len(vae.config.block_out_channels) - 1)
@@ -292,6 +292,9 @@ def generate(
     if _progress_callback is not None:
         _progress_callback(0.85, "解码 VAE...")
     logger.info("Decoding VAE...")
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+
     shift_factor = getattr(vae.config, "shift_factor", 0.0) or 0.0
     latents = (latents.to(vae.dtype) / vae.config.scaling_factor) + shift_factor
     image = vae.decode(latents, return_dict=False)[0]
@@ -332,7 +335,7 @@ def generate_img2img(
     output_type: str = "pil",
     _progress_callback: Optional[Callable[[float, str], None]] = None,
 ):
-    device = next(transformer.parameters()).device
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     if hasattr(vae, "config") and hasattr(vae.config, "block_out_channels"):
         vae_scale_factor = 2 ** (len(vae.config.block_out_channels) - 1)
@@ -546,6 +549,9 @@ def generate_img2img(
     if _progress_callback is not None:
         _progress_callback(0.85, "解码 VAE...")
     logger.info("Decoding VAE...")
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+
     shift_factor = getattr(vae.config, "shift_factor", 0.0) or 0.0
     latents = (latents.to(vae.dtype) / vae.config.scaling_factor) + shift_factor
     image = vae.decode(latents, return_dict=False)[0]

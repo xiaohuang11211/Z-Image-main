@@ -1,0 +1,10 @@
+torch>=2.5.0
+transformers>=4.51.0
+safetensors
+loguru
+pillow
+accelerate
+huggingface_hub>=0.25.0
+gradio>=4.0,<7.0
+psutil
+tqdm

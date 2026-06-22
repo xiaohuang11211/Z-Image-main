@@ -3,6 +3,7 @@ import json, os, time, warnings, threading, queue
 from pathlib import Path
 from collections import OrderedDict
 
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import torch
 import gradio as gr
 import psutil
@@ -710,8 +711,37 @@ with gr.Blocks(title="Z-Image 文生图/图生图", css=CSS, theme=gr.themes.Sof
             }
             all_records.append(record)
 
+            # Incremental yield: show current image in browser immediately
+            cur_history = all_records + list(history_state)
+            cur_gallery = build_gallery(cur_history)
+            cur_detail = (
+                f"**提示词:** {record['prompt'][:150]}{'…' if len(record['prompt'])>150 else ''}\n\n"
+                f"**负向提示:** {record['negative_prompt'][:100] or '(无)'}\n\n"
+                f"**模型:** {model_display_name} | **尺寸:** {width}×{height} | "
+                f"**步数:** {steps} | **CFG:** {guidance_scale}"
+            )
+            if batch_count > 1:
+                cur_detail += f"\n\n📦 **{batch_i+1}/{batch_count}** | ⏱ {record['elapsed']:.1f}s"
+            else:
+                cur_detail += f" | **种子:** {record['params']['seed']}\n\n"
+                cur_detail += f"⏱ **耗时:** {record['elapsed']:.1f}s"
+
+            yield (
+                img,
+                f'<div style="display:flex;align-items:center;gap:12px;padding:6px 12px;background:var(--background-fill-secondary);border-radius:6px;color:#aaa;font-family:monospace;font-size:0.85rem">'
+                f'<span>✅ {batch_i+1}/{batch_count}</span><span style="margin-left:auto;color:#aaa">{record["elapsed"]:.1f}s</span></div>',
+                f"✅ 完成 {batch_i+1}/{batch_count}",
+                cur_history, cur_gallery, cur_detail,
+                get_system_stats(), save_path,
+                "\n".join(log_lines[-20:]),
+            )
+
+            # GPU cleanup between batch iterations
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+
         # save all records to history
-        history_state = all_records + history_state
+        history_state = all_records + list(history_state)
         save_history(history_state)
         gallery = build_gallery(history_state)
         stats = get_system_stats()

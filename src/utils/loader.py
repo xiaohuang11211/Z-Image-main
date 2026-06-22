@@ -99,7 +99,7 @@ def load_from_local_dir(
     """
     model_dir = Path(model_dir)
 
-    sys.path.insert(0, str(model_dir.parent.parent / "Z-Image" / "src"))
+    sys.path.insert(0, str(model_dir.parent.parent / "src"))
     from zimage.transformer import ZImageTransformer2DModel
 
     if verbose:
@@ -111,36 +111,37 @@ def load_from_local_dir(
     transformer_dir = model_dir / "transformer"
     config = load_config(str(transformer_dir / "config.json"))
 
-    with torch.device("meta"):
-        transformer = ZImageTransformer2DModel(
-            all_patch_size=tuple(config.get("all_patch_size", DEFAULT_TRANSFORMER_PATCH_SIZE)),
-            all_f_patch_size=tuple(config.get("all_f_patch_size", DEFAULT_TRANSFORMER_F_PATCH_SIZE)),
-            in_channels=config.get("in_channels", DEFAULT_TRANSFORMER_IN_CHANNELS),
-            dim=config.get("dim", DEFAULT_TRANSFORMER_DIM),
-            n_layers=config.get("n_layers", DEFAULT_TRANSFORMER_N_LAYERS),
-            n_refiner_layers=config.get("n_refiner_layers", DEFAULT_TRANSFORMER_N_REFINER_LAYERS),
-            n_heads=config.get("n_heads", DEFAULT_TRANSFORMER_N_HEADS),
-            n_kv_heads=config.get("n_kv_heads", DEFAULT_TRANSFORMER_N_KV_HEADS),
-            norm_eps=config.get("norm_eps", DEFAULT_TRANSFORMER_NORM_EPS),
-            qk_norm=config.get("qk_norm", DEFAULT_TRANSFORMER_QK_NORM),
-            cap_feat_dim=config.get("cap_feat_dim", DEFAULT_TRANSFORMER_CAP_FEAT_DIM),
-            rope_theta=config.get("rope_theta", ROPE_THETA),
-            t_scale=config.get("t_scale", DEFAULT_TRANSFORMER_T_SCALE),
-            axes_dims=config.get("axes_dims", ROPE_AXES_DIMS),
-            axes_lens=config.get("axes_lens", ROPE_AXES_LENS),
-        ).to(dtype)
+    transformer = ZImageTransformer2DModel(
+        all_patch_size=tuple(config.get("all_patch_size", DEFAULT_TRANSFORMER_PATCH_SIZE)),
+        all_f_patch_size=tuple(config.get("all_f_patch_size", DEFAULT_TRANSFORMER_F_PATCH_SIZE)),
+        in_channels=config.get("in_channels", DEFAULT_TRANSFORMER_IN_CHANNELS),
+        dim=config.get("dim", DEFAULT_TRANSFORMER_DIM),
+        n_layers=config.get("n_layers", DEFAULT_TRANSFORMER_N_LAYERS),
+        n_refiner_layers=config.get("n_refiner_layers", DEFAULT_TRANSFORMER_N_REFINER_LAYERS),
+        n_heads=config.get("n_heads", DEFAULT_TRANSFORMER_N_HEADS),
+        n_kv_heads=config.get("n_kv_heads", DEFAULT_TRANSFORMER_N_KV_HEADS),
+        norm_eps=config.get("norm_eps", DEFAULT_TRANSFORMER_NORM_EPS),
+        qk_norm=config.get("qk_norm", DEFAULT_TRANSFORMER_QK_NORM),
+        cap_feat_dim=config.get("cap_feat_dim", DEFAULT_TRANSFORMER_CAP_FEAT_DIM),
+        rope_theta=config.get("rope_theta", ROPE_THETA),
+        t_scale=config.get("t_scale", DEFAULT_TRANSFORMER_T_SCALE),
+        axes_dims=config.get("axes_dims", ROPE_AXES_DIMS),
+        axes_lens=config.get("axes_lens", ROPE_AXES_LENS),
+    ).to(dtype).to("cpu")
 
-    # DiT (weights to CPU then move to GPU to optimize memory)
     state_dict = load_sharded_safetensors(transformer_dir, device="cpu", dtype=dtype)
     transformer.load_state_dict(state_dict, strict=False, assign=True)
     del state_dict
 
     if verbose:
-        logger.info("Moving DiT to GPU...")
-    transformer = transformer.to(device)
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+        logger.info("Keeping DiT on CPU (blocks moved to GPU per-step inside forward)...")
     transformer.eval()
+
+    if device != "cpu":
+        for m in [transformer.all_x_embedder, transformer.t_embedder, transformer.cap_embedder]:
+            m.to(device)
+        transformer.x_pad_token.data = transformer.x_pad_token.data.to(device)
+        transformer.cap_pad_token.data = transformer.cap_pad_token.data.to(device)
 
     # VAE
     if verbose:

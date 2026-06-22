@@ -518,8 +518,11 @@ class ZImageTransformer2DModel(nn.Module):
         for i, seq_len in enumerate(x_item_seqlens):
             x_attn_mask[i, :seq_len] = 1
 
+        _cuda = device
         for layer in self.noise_refiner:
+            layer.to(_cuda)
             x = layer(x, x_attn_mask, x_freqs_cis, adaln_input)
+            layer.to("cpu")
 
         cap_item_seqlens = [len(_) for _ in cap_feats]
         assert all(_ % SEQ_MULTI_OF == 0 for _ in cap_item_seqlens)
@@ -542,7 +545,9 @@ class ZImageTransformer2DModel(nn.Module):
             cap_attn_mask[i, :seq_len] = 1
 
         for layer in self.context_refiner:
+            layer.to(_cuda)
             cap_feats = layer(cap_feats, cap_attn_mask, cap_freqs_cis)
+            layer.to("cpu")
 
         unified = []
         unified_freqs_cis = []
@@ -562,9 +567,14 @@ class ZImageTransformer2DModel(nn.Module):
             unified_attn_mask[i, :seq_len] = 1
 
         for layer in self.layers:
+            layer.to(_cuda)
             unified = layer(unified, unified_attn_mask, unified_freqs_cis, adaln_input)
+            layer.to("cpu")
 
-        unified = self.all_final_layer[f"{patch_size}-{f_patch_size}"](unified, adaln_input)
+        _final = self.all_final_layer[f"{patch_size}-{f_patch_size}"]
+        _final.to(_cuda)
+        unified = _final(unified, adaln_input)
+        _final.to("cpu")
         unified = list(unified.unbind(dim=0))
         x = self.unpatchify(unified, x_size, patch_size, f_patch_size)
 

@@ -7,6 +7,8 @@ echo ========================================
 
 cd /d "%~dp0"
 
+set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 set PYTHON_CMD=
 
 REM Check common Python install locations (skip Windows Store stub)
@@ -16,7 +18,6 @@ for %%p in (
     "%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
     "C:\Python312\python.exe"
     "C:\Python313\python.exe"
-    "C:\Users\zzz\AppData\Local\Programs\Python\Python312\python.exe"
 ) do if exist %%p set PYTHON_CMD=%%p
 
 REM Check system PATH (skip WindowsApps)

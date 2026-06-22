@@ -225,6 +225,22 @@ image.save("example.png")
 
 </details>
 
+#### (3) WebUI (Gradio)
+
+Launch an interactive Gradio WebUI for text-to-image and image-to-image generation:
+
+```bash
+# Install dependencies (if not already done)
+pip install -e .
+
+# Start the WebUI
+python webui.py
+```
+
+Then open http://localhost:7860 in your browser.
+
+On Windows, you can also double-click `start.bat` (English) or `启动(快速).bat` (Chinese) to launch directly.
+
 ## 🔬 Decoupled-DMD: The Acceleration Magic Behind Z-Image
 
 [![arXiv](https://img.shields.io/badge/arXiv-2511.22677-b31b1b.svg)](https://arxiv.org/abs/2511.22677)
