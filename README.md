@@ -11,6 +11,14 @@
 - **批次生成** — 一次生成多张图像
 - **批量计数** — WebUI 直接选择生成张数
 
+## Screenshots
+
+| 界面概览 | 生成进度 |
+|:---:|:---:|
+| ![main](screenshots/main_interface.png) | ![progress](screenshots/progress_tab.png) |
+| **历史记录** | **参数设置** |
+| ![history](screenshots/history_tab.png) | ![settings](screenshots/settings_tab.png) |
+
 ## Quick Start
 #### (1) PyTorch Native Inference
 Build a virtual environment you like and then install the dependencies:

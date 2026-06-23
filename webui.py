@@ -367,7 +367,7 @@ CSS = """
 """
 
 with gr.Blocks(title="Z-Image 文生图/图生图", css=CSS, theme=gr.themes.Soft()) as demo:
-    gr.Markdown("""# ⚡ Z-Image  ·  阿里巴巴通义实验室
+    gr.Markdown("""# ⚡ Z-Image
 <small style="color:#888">文生图 / 图生图 · 支持取消/批量/自定义模型/自动下载/社区模型</small>""")
 
     history_state = gr.State([])
@@ -561,13 +561,16 @@ with gr.Blocks(title="Z-Image 文生图/图生图", css=CSS, theme=gr.themes.Sof
         # load model once
         log_lines = [f"[{time.strftime('%H:%M:%S')}] 加载模型: {model_display_name}"]
 
-        def _yield(stage_text):
+        def _yield(stage_text, pct=0.0):
             stats = get_system_stats()
             elapsed = getattr(_yield, "elapsed", "0.0")
+            bar = ""
+            if pct > 0:
+                bar = f'<div style="width:100%;height:4px;background:#444;border-radius:2px;margin-top:4px"><div style="width:{pct*100:.0f}%;height:100%;background:linear-gradient(90deg,#4CAF50,#8BC34A);border-radius:2px;transition:width 0.3s"></div></div>'
             return (
                 None,
                 f'<div style="display:flex;align-items:center;gap:12px;padding:6px 12px;background:var(--background-fill-secondary);border-radius:6px;color:#888;font-family:monospace;font-size:0.85rem">'
-                f'<span>⏳ {stage_text}</span><span style="margin-left:auto;color:#aaa">{elapsed}s</span></div>',
+                f'<span>⏳ {stage_text}</span><span style="margin-left:auto;color:#aaa">{elapsed}s</span></div>{bar}',
                 f"⏱ 进行中: {stage_text}",
                 history_state, gr.skip(), gr.skip(),
                 stats, "", "\n".join(log_lines[-20:]),
@@ -616,7 +619,7 @@ with gr.Blocks(title="Z-Image 文生图/图生图", css=CSS, theme=gr.themes.Sof
                 _yield.elapsed = f"{time.time() - t0:.1f}"
                 log_lines.append(f"[{time.strftime('%H:%M:%S')}] {desc} ({_yield.elapsed}s)")
                 _immediate_queue.put_nowait(
-                    (_yield.elapsed, desc, get_system_stats(), "\n".join(log_lines[-20:]))
+                    (pct, _yield.elapsed, desc, get_system_stats(), "\n".join(log_lines[-20:]))
                 )
 
             def _thread_target(
@@ -650,25 +653,38 @@ with gr.Blocks(title="Z-Image 文生图/图生图", css=CSS, theme=gr.themes.Sof
             )
             t_gen.start()
 
-            _last_yield = None
+            _last_state = None
             while t_gen.is_alive():
                 try:
                     while True:
-                        _elapsed, _desc, _stats, _log_text = _immediate_queue.get_nowait()
-                        _last_yield = (_elapsed, _desc, _stats, _log_text)
+                        _pct, _elapsed, _desc, _stats, _log_text = _immediate_queue.get_nowait()
+                        _last_state = (_pct, _desc, _stats, _log_text)
                 except queue.Empty:
                     pass
-                if _last_yield is not None:
-                    _elapsed, _desc, _stats, _log_text = _last_yield
+                if _last_state is not None:
+                    _pct, _desc, _stats, _log_text = _last_state
+                    _live = f"{time.time() - t0:.1f}"
+                    _bar = ""
+                    if _pct > 0:
+                        _bar = f'<div style="width:100%;height:4px;background:#444;border-radius:2px;margin-top:4px"><div style="width:{_pct*100:.0f}%;height:100%;background:linear-gradient(90deg,#4CAF50,#8BC34A);border-radius:2px;transition:width 0.3s"></div></div>'
                     yield (
                         None,
                         f'<div style="display:flex;align-items:center;gap:12px;padding:6px 12px;background:var(--background-fill-secondary);border-radius:6px;color:#888;font-family:monospace;font-size:0.85rem">'
-                        f'<span>⏳ {_desc}</span><span style="margin-left:auto;color:#aaa">{_elapsed}s</span></div>',
+                        f'<span>⏳ {_desc}</span><span style="margin-left:auto;color:#aaa">{_live}s</span></div>{_bar}',
                         f"⏱ {_desc}",
                         history_state, gr.skip(), gr.skip(),
                         _stats, "", _log_text,
                     )
-                    _last_yield = None
+                else:
+                    _live = f"{time.time() - t0:.1f}"
+                    yield (
+                        None,
+                        f'<div style="display:flex;align-items:center;gap:12px;padding:6px 12px;background:var(--background-fill-secondary);border-radius:6px;color:#888;font-family:monospace;font-size:0.85rem">'
+                        f'<span>⏳ 准备中...</span><span style="margin-left:auto;color:#aaa">{_live}s</span></div>',
+                        f"⏱ 准备中...",
+                        history_state, gr.skip(), gr.skip(),
+                        get_system_stats(), "", "",
+                    )
                 if _cancel_event.is_set():
                     break
                 time.sleep(0.25)
@@ -729,7 +745,8 @@ with gr.Blocks(title="Z-Image 文生图/图生图", css=CSS, theme=gr.themes.Sof
             yield (
                 img,
                 f'<div style="display:flex;align-items:center;gap:12px;padding:6px 12px;background:var(--background-fill-secondary);border-radius:6px;color:#aaa;font-family:monospace;font-size:0.85rem">'
-                f'<span>✅ {batch_i+1}/{batch_count}</span><span style="margin-left:auto;color:#aaa">{record["elapsed"]:.1f}s</span></div>',
+                f'<span>✅ {batch_i+1}/{batch_count}</span><span style="margin-left:auto;color:#aaa">{record["elapsed"]:.1f}s</span></div>'
+                f'<div style="width:100%;height:4px;background:#444;border-radius:2px;margin-top:4px"><div style="width:100%;height:100%;background:linear-gradient(90deg,#4CAF50,#8BC34A);border-radius:2px"></div></div>',
                 f"✅ 完成 {batch_i+1}/{batch_count}",
                 cur_history, cur_gallery, cur_detail,
                 get_system_stats(), save_path,
@@ -764,7 +781,8 @@ with gr.Blocks(title="Z-Image 文生图/图生图", css=CSS, theme=gr.themes.Sof
         yield (
             last_img,
             f'<div style="display:flex;align-items:center;gap:12px;padding:6px 12px;background:var(--background-fill-secondary);border-radius:6px;color:#4caf50;font-family:monospace;font-size:0.85rem">'
-            f'<span>✅ 完成 {batch_count} 张</span><span style="margin-left:auto;color:#aaa">{total_elapsed:.1f}s</span></div>',
+            f'<span>✅ 完成 {batch_count} 张</span><span style="margin-left:auto;color:#aaa">{total_elapsed:.1f}s</span></div>'
+            f'<div style="width:100%;height:4px;background:#444;border-radius:2px;margin-top:4px"><div style="width:100%;height:100%;background:linear-gradient(90deg,#4CAF50,#8BC34A);border-radius:2px"></div></div>',
             f"⏱ 总耗时: **{total_elapsed:.1f}秒** | {batch_count} 张 | Steps: {steps} | CFG: {guidance_scale}",
             history_state, gallery, detail_md,
             stats, saved_paths[0],
@@ -864,4 +882,4 @@ with gr.Blocks(title="Z-Image 文生图/图生图", css=CSS, theme=gr.themes.Sof
 
 if __name__ == "__main__":
     demo.queue(default_concurrency_limit=3)
-    demo.launch(server_name="0.0.0.0", server_port=7860, share=False)
+    demo.launch(server_name="0.0.0.0", server_port=7860, share=False, inbrowser=True)
