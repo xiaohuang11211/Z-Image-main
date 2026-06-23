@@ -18,6 +18,10 @@
 | ![main](screenshots/main_interface.png) | ![progress](screenshots/progress_tab.png) |
 | **历史记录** | **参数设置** |
 | ![history](screenshots/history_tab.png) | ![settings](screenshots/settings_tab.png) |
+| **文生图** | **图生图** |
+| ![txt2img](screenshots/ScreenShot_2026-06-23_104834_332.png) | ![img2img](screenshots/ScreenShot_2026-06-23_104911_188.png) |
+| **模型选择** | **系统监控** |
+| ![model](screenshots/ScreenShot_2026-06-23_104933_620.png) | |
 
 ## Quick Start
 #### (1) PyTorch Native Inference
